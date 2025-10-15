@@ -215,10 +215,7 @@ done
 ```
 
 ### Q: Can I mix hg19 and hg38 in the same analysis?
-**A:** Yes! The pipeline handles this automatically with liftOver. However:
-- ⚠️ Some SNPs may be lost in liftOver
-- ⚠️ Positions will change
-- ✅ Best practice: use same build if possible
+**A:** Yes! The pipeline handles this automatically with liftOver, but it's possible some SNPs may be lost or undergo position changes during liftOver via the imputation servers. Performing liftOver before imputation may help accuracy but isn't essential as both All of Us and TOPMed Servers incoporate liftOver as part of their process.
 
 ---
 
