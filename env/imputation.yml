@@ -1,0 +1,79 @@
+# Conda environment for imputation tools
+# Includes imputationbot, liftOver, and related utilities
+
+name: imputation
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Python and essential packages
+  - python=3.9
+  - pip                  # For packages not in conda
+
+  # Imputation tools
+  # Note: imputationbot may need to be installed via pip
+  # See: https://github.com/lukfor/imputationbot
+
+  # Genome build conversion
+  - ucsc-liftover=377    # For hg19 to hg38 conversion
+  
+  # VCF manipulation
+  - bcftools=1.17        # VCF file manipulation
+  - vcftools=0.1.16      # VCF utilities
+  - htslib=1.17          # Support for VCF tools
+  - tabix=1.11           # VCF indexing
+  
+  # Python packages for data manipulation
+  - pandas
+  - numpy
+  - scipy
+  - requests             # For API calls
+  - urllib3              # URL handling
+  - python-dateutil      # Date parsing
+  
+  # File compression
+  - pigz                 # Parallel gzip
+  - pbzip2               # Parallel bzip2
+  
+  # Utilities for API interactions
+  - curl
+  - wget
+  - jq                   # JSON parsing
+  
+  # Monitoring and logging
+  - tqdm                 # Progress bars
+  
+  # Install via pip after environment creation:
+  # - imputationbot
+
+# To create this environment:
+# conda env create -f imputation.yml
+
+# To activate:
+# conda activate imputation
+
+# Post-installation pip commands:
+# pip install imputationbot
+
+# To configure imputationbot:
+# imputationbot configure --instances \
+#   topmed=https://imputation.biodatacatalyst.nhlbi.nih.gov \
+#   michigan=https://imputationserver.sph.umich.edu
+
+# To add API token (do this per user):
+# imputationbot add-instance topmed \
+#   --url https://imputation.biodatacatalyst.nhlbi.nih.gov \
+#   --token YOUR_API_TOKEN
+
+# Download liftOver chain files (hg19 to hg38):
+# mkdir -p $CONDA_PREFIX/share/liftover_chains
+# cd $CONDA_PREFIX/share/liftover_chains
+# wget http://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz
+# gunzip hg19ToHg38.over.chain.gz
+
+# To test:
+# liftOver
+# bcftools --version
+# python -c "import imputationbot"
