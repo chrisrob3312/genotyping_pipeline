@@ -134,7 +134,7 @@ process BASIC_QC {
     # Step 2: Remove monomorphic SNPs
     plink \\
         --bfile ${platform_id}_step1 \\
-        --maf 0.000001 \\
+        --maf 0.0 \\
         --make-bed \\
         --out ${platform_id}_step2 \\
         --threads ${task.cpus}
