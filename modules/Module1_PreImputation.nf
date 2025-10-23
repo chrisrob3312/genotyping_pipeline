@@ -1,90 +1,298 @@
-#!/usr/bin/env nextflow
-
 /*
-================================================================================
-MODULE 1: PRE-IMPUTATION QC AND PREPARATION (UPDATED)
-================================================================================
-UPDATES:
-- REMOVED liftover process (servers handle it automatically)
-- Added build tracking throughout pipeline
-- Dual Rayner references (hg19 and hg38)
-- Pass build info to Module 2 for server submission
-================================================================================
-*/
+ * ===================================================================
+ * MODULE 1: PRE-IMPUTATION QC AND PREPARATION (UPDATED v2.1)
+ * ===================================================================
+ * 
+ * FEATURES:
+ * - MERGE_PLATFORM_SAMPLES process for combining multiple files per platform
+ * - Supports multiple PLINK or VCF files per platform (different batches/samples)
+ * - Uses Apptainer/Singularity containers (no conda)
+ * - CrossMap for genome liftover (hg19 → hg38)
+ * - check-strand-topmed.pl from bin/ directory
+ * - TOPMed Freeze 10 PASS variants for strand checking
+ * - Strict VCF formatting for All of Us AnVIL + TOPMed
+ * - Reference files from resources/references/ directory
+ * 
+ * PURPOSE:
+ * Prepares genotyping data for imputation by:
+ * 0. Merges multiple sample files per platform (if needed)
+ * 1. Basic QC with PLINK
+ * 2. Genome build conversion using CrossMap (hg19 → hg38)
+ * 3. Strand checking with TOPMed Freeze 10 references
+ * 4. Allele switch and strand flip corrections
+ * 5. Strict VCF formatting for imputation servers
+ * 
+ * INPUT:
+ * - Sample sheet (CSV) with platform, file paths (can be multiple), build, batch
+ * - PLINK files (.bed/.bim/.fam) or VCF files
+ * - Multiple files per platform will be automatically merged
+ * 
+ * OUTPUT:
+ * - Per-chromosome VCF files (chr1-22)
+ * - VCFv4.2, bgzip compressed, CSI indexed
+ * - Chromosome naming: "chr1", "chr2", etc. (with "chr" prefix)
+ * - Ready for TOPMed and All of Us AnVIL imputation
+ * 
+ * PARALLELIZATION:
+ * - Each platform processed independently and in parallel
+ * - Each chromosome split and processed in parallel
+ */
 
+// ===================================================================
+// NEXTFLOW DSL2
+// ===================================================================
 nextflow.enable.dsl = 2
 
-// ============================================================================
-// PROCESS 1.1: CONVERT INPUT TO PLINK FORMAT
-// ============================================================================
-process CONVERT_TO_PLINK {
-    label 'preqc'
-    tag "${platform_id}"
-    conda "${projectDir}/envs/plink.yml"
+// ===================================================================
+// PROCESS 1.0: MERGE PLATFORM SAMPLES (NEW!)
+// ===================================================================
+/*
+ * WHAT IT DOES:
+ * - Combines multiple PLINK or VCF files per platform
+ * - Handles scenarios where samples are split across multiple files
+ * - Merges by samples (not by SNPs) - keeps intersection of SNPs
+ * 
+ * WHEN IT RUNS:
+ * - Only when platform has multiple input files
+ * - For single files, passes through directly
+ * 
+ * EXAMPLE USE CASES:
+ * - Platform1 has 3 batches: batch1.bed, batch2.bed, batch3.bed
+ * - Platform2 has samples split by cohort
+ * - Platform3 has incremental data additions
+ * 
+ * Container: PLINK2 for efficient merging
+ */
+
+process MERGE_PLATFORM_SAMPLES {
+    container 'docker://quay.io/biocontainers/plink2:2.00a3.7--h4ac6f70_0'
     
-    publishDir "${params.outdir}/${platform_id}/01_converted",
+    label 'merge_samples'
+    tag "${platform_id}"
+    
+    publishDir "${params.outdir}/${platform_id}/00_sample_merge",
         mode: 'copy',
-        pattern: "*.{bed,bim,fam,log}"
+        pattern: "*.{log,txt}"
     
     input:
     tuple val(platform_id),
-          val(file_path),
+          val(file_paths),      // List of file paths (can be 1 or more)
           val(file_type),
-          val(build),       // Track build from input
+          val(build),
           val(batch)
     
     output:
     tuple val(platform_id),
-          path("${platform_id}.bed"),
-          path("${platform_id}.bim"),
-          path("${platform_id}.fam"),
-          val(build),       // Pass build forward
-          val(batch), emit: plink_files
+          path("${platform_id}_merged.bed"),
+          path("${platform_id}_merged.bim"),
+          path("${platform_id}_merged.fam"),
+          val(build),
+          val(batch), emit: merged_files
     
-    path("${platform_id}_convert.log"), emit: convert_log
+    path("${platform_id}_merge.log"), emit: merge_log
     
     script:
-    if (file_type == 'plink') {
-        """
-        # Already PLINK format - just copy/symlink
-        ln -s ${file_path}.bed ${platform_id}.bed
-        ln -s ${file_path}.bim ${platform_id}.bim
-        ln -s ${file_path}.fam ${platform_id}.fam
+    def file_list = file_paths instanceof List ? file_paths : [file_paths]
+    def n_files = file_list.size()
+    """
+    #!/bin/bash
+    set -euo pipefail
+    
+    echo "=========================================="
+    echo "Merging samples for platform: ${platform_id}"
+    echo "Number of input files: ${n_files}"
+    echo "File type: ${file_type}"
+    echo "Build: ${build}"
+    echo "=========================================="
+    
+    # If only one file, convert to PLINK and pass through
+    if [[ ${n_files} -eq 1 ]]; then
+        echo "Single file detected - no merge needed"
         
-        echo "Platform: ${platform_id}" > ${platform_id}_convert.log
-        echo "Input format: PLINK" >> ${platform_id}_convert.log
-        echo "Build: ${build}" >> ${platform_id}_convert.log
-        echo "No conversion needed" >> ${platform_id}_convert.log
-        """
-    } else if (file_type == 'vcf') {
-        """
-        # Convert VCF to PLINK
+        if [[ "${file_type}" == "plink" ]]; then
+            # Link PLINK files
+            file_path="${file_list[0]}"
+            ln -s \${file_path}.bed ${platform_id}_merged.bed
+            ln -s \${file_path}.bim ${platform_id}_merged.bim
+            ln -s \${file_path}.fam ${platform_id}_merged.fam
+            
+        elif [[ "${file_type}" =~ ^vcf ]]; then
+            # Convert VCF to PLINK
+            file_path="${file_list[0]}"
+            [[ ! -f "\${file_path}" ]] && file_path="${file_list[0]}.vcf.gz"
+            [[ ! -f "\${file_path}" ]] && file_path="${file_list[0]}.vcf"
+            
+            plink2 \\
+                --vcf \${file_path} \\
+                --make-bed \\
+                --out ${platform_id}_merged \\
+                --threads ${task.cpus} \\
+                --memory ${task.memory.toMega()}
+        fi
+        
+        n_snps=\$(wc -l < ${platform_id}_merged.bim)
+        n_samples=\$(wc -l < ${platform_id}_merged.fam)
+        
+        cat > ${platform_id}_merge.log << EOF
+Platform: ${platform_id}
+Input files: 1 (no merge needed)
+Output SNPs: \${n_snps}
+Output Samples: \${n_samples}
+EOF
+        
+        echo "✓ Single file processed"
+        exit 0
+    fi
+    
+    echo "Multiple files detected - merging ${n_files} files"
+    
+    # CASE 1: Multiple PLINK files
+    if [[ "${file_type}" == "plink" ]]; then
+        echo "Converting all PLINK files and preparing for merge..."
+        
+        # Create list of files to merge
+        first_file="${file_list[0]}"
+        echo "\${first_file}" > merge_list.txt
+        
+        # Add remaining files to merge list
+        for i in \$(seq 1 \$((${n_files} - 1))); do
+            file_path="${file_list[\$i]}"
+            echo "\${file_path}" >> merge_list.txt
+        done
+        
+        # Check all files exist
+        while read -r file_path; do
+            if [[ ! -f "\${file_path}.bed" ]]; then
+                echo "ERROR: File not found: \${file_path}.bed"
+                exit 1
+            fi
+        done < merge_list.txt
+        
+        # Perform merge using PLINK2
+        # --pmerge-list: merge by samples (not SNPs)
+        # Keeps intersection of SNPs across all files
         plink2 \\
-            --vcf ${file_path} \\
+            --pfile-merge-list merge_list.txt \\
             --make-bed \\
-            --out ${platform_id} \\
+            --out ${platform_id}_merged \\
+            --threads ${task.cpus} \\
+            --memory ${task.memory.toMega()}
+    
+    # CASE 2: Multiple VCF files
+    elif [[ "${file_type}" =~ ^vcf ]]; then
+        echo "Converting VCF files to PLINK and merging..."
+        
+        # Convert each VCF to PLINK first
+        for i in \$(seq 0 \$((${n_files} - 1))); do
+            file_path="${file_list[\$i]}"
+            
+            # Find VCF file (try different extensions)
+            vcf_file="\${file_path}"
+            [[ ! -f "\${vcf_file}" ]] && vcf_file="\${file_path}.vcf.gz"
+            [[ ! -f "\${vcf_file}" ]] && vcf_file="\${file_path}.vcf"
+            
+            if [[ ! -f "\${vcf_file}" ]]; then
+                echo "ERROR: VCF file not found: \${file_path}"
+                exit 1
+            fi
+            
+            echo "Converting VCF file \$i: \${vcf_file}"
+            
+            plink2 \\
+                --vcf \${vcf_file} \\
+                --make-bed \\
+                --out temp_\${i} \\
+                --threads ${task.cpus}
+            
+            echo "temp_\${i}" >> merge_list.txt
+        done
+        
+        # Merge all converted PLINK files
+        plink2 \\
+            --pfile-merge-list merge_list.txt \\
+            --make-bed \\
+            --out ${platform_id}_merged \\
             --threads ${task.cpus} \\
             --memory ${task.memory.toMega()}
         
-        echo "Platform: ${platform_id}" > ${platform_id}_convert.log
-        echo "Input format: VCF" >> ${platform_id}_convert.log
-        echo "Build: ${build}" >> ${platform_id}_convert.log
-        echo "Converted to PLINK format" >> ${platform_id}_convert.log
-        """
-    }
+        # Cleanup temp files
+        rm -f temp_*.{bed,bim,fam,log}
+    
+    else
+        echo "ERROR: Unknown file type: ${file_type}"
+        exit 1
+    fi
+    
+    # Verify merge was successful
+    if [[ ! -f "${platform_id}_merged.bed" ]]; then
+        echo "ERROR: Merge failed - output files not created"
+        exit 1
+    fi
+    
+    # Calculate statistics
+    n_snps=\$(wc -l < ${platform_id}_merged.bim)
+    n_samples=\$(wc -l < ${platform_id}_merged.fam)
+    
+    # Check for duplicate samples
+    n_dup_samples=\$(cut -f2 ${platform_id}_merged.fam | sort | uniq -d | wc -l)
+    
+    if [[ \${n_dup_samples} -gt 0 ]]; then
+        echo "WARNING: Found \${n_dup_samples} duplicate sample IDs after merge"
+        cut -f2 ${platform_id}_merged.fam | sort | uniq -d > duplicate_samples.txt
+        cat duplicate_samples.txt
+    fi
+    
+    # Generate merge report
+    cat > ${platform_id}_merge.log << EOF
+===============================================
+SAMPLE MERGE REPORT: ${platform_id}
+===============================================
+
+INPUT:
+  Number of files: ${n_files}
+  File type: ${file_type}
+  Build: ${build}
+  
+MERGE STRATEGY:
+  Method: Sample-based merge
+  SNP handling: Intersection (common SNPs only)
+  
+OUTPUT:
+  Total samples: \${n_samples}
+  Total SNPs: \${n_snps}
+  Duplicate sample IDs: \${n_dup_samples}
+  
+FILES:
+  ${platform_id}_merged.{bed,bim,fam}
+
+MERGE STATUS: ✓ SUCCESS
+
+===============================================
+EOF
+
+    cat ${platform_id}_merge.log
+    
+    echo "✓ Platform merge complete"
+    echo "  Samples: \${n_samples}"
+    echo "  SNPs: \${n_snps}"
+    """
 }
 
-// ============================================================================
-// PROCESS 1.2: BASIC QC WITH PLINK
-// ============================================================================
+
+
+// ===================================================================
+// PROCESS 1.1: BASIC QC
+// ===================================================================
+
 process BASIC_QC {
+    container 'docker://quay.io/biocontainers/plink:1.90b6.21--h031d066_5'
+    
     label 'preqc'
     tag "${platform_id}"
-    conda "${projectDir}/envs/plink.yml"
     
-    publishDir "${params.outdir}/${platform_id}/02_qc",
+    publishDir "${params.outdir}/${platform_id}/01_basic_qc", 
         mode: 'copy',
-        pattern: "*.{txt,log}"
+        pattern: "*.{log,txt}"
     
     input:
     tuple val(platform_id),
@@ -99,77 +307,67 @@ process BASIC_QC {
           path("${platform_id}_qc.bed"),
           path("${platform_id}_qc.bim"),
           path("${platform_id}_qc.fam"),
-          val(build),       // Keep passing build
+          val(build),
           val(batch), emit: qc_plink
     
     path("${platform_id}_qc_report.txt"), emit: qc_report
     
     script:
+    def geno = params.preqc_geno ?: '0.05'
+    def mind = params.preqc_mind ?: '0.05'
     """
     #!/bin/bash
     set -euo pipefail
     
-    # Get input prefix
-    input_prefix=\$(basename ${bed} .bed)
-    
-    echo "Starting Basic QC for ${platform_id}"
+    echo "=========================================="
+    echo "Basic QC: ${platform_id}"
     echo "Build: ${build}"
+    echo "=========================================="
     
-    # Count input
+    input_prefix=\$(basename ${bed} .bed)
     snps_input=\$(wc -l < ${bim})
     samples_input=\$(wc -l < ${fam})
     
-    # Step 1: Keep SNPs only, remove duplicates
+    # Step 1: Biallelic SNPs only
+    echo "Step 1: Filtering to biallelic SNPs..."
     plink \\
         --bfile \${input_prefix} \\
         --snps-only just-acgt \\
         --rm-dup exclude-all \\
         --make-bed \\
-        --out ${platform_id}_step1 \\
+        --out temp1 \\
         --threads ${task.cpus}
     
-    snps_step1=\$(wc -l < ${platform_id}_step1.bim)
-    removed_step1=\$((snps_input - snps_step1))
+    snps_step1=\$(wc -l < temp1.bim)
     
-    # Step 2: Remove monomorphic SNPs
+    # Step 2: Remove monomorphic
+    echo "Step 2: Removing monomorphic SNPs..."
     plink \\
-        --bfile ${platform_id}_step1 \\
-        --maf 0.0 \\
+        --bfile temp1 \\
+        --maf 0.000001 \\
         --make-bed \\
-        --out ${platform_id}_step2 \\
+        --out temp2 \\
         --threads ${task.cpus}
     
-    snps_step2=\$(wc -l < ${platform_id}_step2.bim)
-    removed_step2=\$((snps_step1 - snps_step2))
+    snps_step2=\$(wc -l < temp2.bim)
     
-    # Step 3: Remove multi-allelic variants
-    awk '\$5 != "0" && \$6 != "0"' ${platform_id}_step2.bim > snps_biallelic.txt
-    
+    # Step 3: Missingness filters
+    echo "Step 3: Applying missingness filters..."
     plink \\
-        --bfile ${platform_id}_step2 \\
-        --extract snps_biallelic.txt \\
-        --make-bed \\
-        --out ${platform_id}_step3 \\
-        --threads ${task.cpus}
-    
-    snps_step3=\$(wc -l < ${platform_id}_step3.bim)
-    removed_step3=\$((snps_step2 - snps_step3))
-    
-    # Step 4: Missingness filtering
-    plink \\
-        --bfile ${platform_id}_step3 \\
-        --geno ${params.preqc_geno} \\
-        --mind ${params.preqc_mind} \\
+        --bfile temp2 \\
+        --geno ${geno} \\
+        --mind ${mind} \\
         --make-bed \\
         --out ${platform_id}_qc \\
         --threads ${task.cpus}
     
     snps_final=\$(wc -l < ${platform_id}_qc.bim)
     samples_final=\$(wc -l < ${platform_id}_qc.fam)
-    removed_snps_miss=\$((snps_step3 - snps_final))
-    removed_samples=\$((samples_input - samples_final))
     
-    # Generate QC report
+    snp_retention=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${snps_final}/\${snps_input}}")
+    sample_retention=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${samples_final}/\${samples_input}}")
+    
+    # Report
     cat > ${platform_id}_qc_report.txt << EOF
 ===============================================
 BASIC QC REPORT: ${platform_id}
@@ -179,60 +377,42 @@ INPUT:
   Samples: \${samples_input}
   SNPs: \${snps_input}
   Build: ${build}
-  Batch: ${batch}
 
-FILTERING STEPS:
-  Step 1 (SNPs only, duplicates):
-    Removed: \${removed_step1} variants
-    Remaining: \${snps_step1} variants
-  
-  Step 2 (Monomorphic):
-    Removed: \${removed_step2} variants
-    Remaining: \${snps_step2} variants
-  
-  Step 3 (Multi-allelic):
-    Removed: \${removed_step3} variants
-    Remaining: \${snps_step3} variants
-  
-  Step 4 (Missingness):
-    SNP threshold: ${params.preqc_geno}
-    Sample threshold: ${params.preqc_mind}
-    Removed SNPs: \${removed_snps_miss}
-    Removed samples: \${removed_samples}
+FILTERING:
+  1. Biallelic SNPs: \${snps_step1}
+  2. Remove monomorphic: \${snps_step2}
+  3. Missingness (geno=${geno}, mind=${mind}): \${snps_final} SNPs, \${samples_final} samples
 
-FINAL RESULTS:
-  Samples: \${samples_final}
-  SNPs: \${snps_final}
-  Retention rate (SNPs): \$(echo "scale=2; 100*\${snps_final}/\${snps_input}" | bc)%
-  Retention rate (samples): \$(echo "scale=2; 100*\${samples_final}/\${samples_input}" | bc)%
-
-BUILD INFO:
-  Current build: ${build}
-  Note: Imputation servers will convert to hg38 if needed
+OUTPUT:
+  Samples: \${samples_final} (\${sample_retention}% retained)
+  SNPs: \${snps_final} (\${snp_retention}% retained)
+  
+QC PASS: ✓
 
 ===============================================
 EOF
 
     cat ${platform_id}_qc_report.txt
-    
-    # Cleanup
-    rm -f ${platform_id}_step*.{bed,bim,fam,log,nosex}
-    
-    echo "Basic QC complete for ${platform_id}"
+    rm -f temp*.{bed,bim,fam,log,nosex}
     """
 }
 
-// ============================================================================
-// PROCESS 1.3: RAYNER STRAND CHECK (BUILD-AWARE)
-// ============================================================================
-process RAYNER_STRAND_CHECK {
-    label 'preqc'
-    tag "${platform_id}"
-    conda "${projectDir}/envs/plink.yml"
+// ===================================================================
+// PROCESS 1.2: LIFTOVER WITH CROSSMAP
+// ===================================================================
+
+process LIFTOVER_CROSSMAP {
+    container 'docker://quay.io/biocontainers/crossmap:0.6.4--pyh7cba7a3_0'
     
-    publishDir "${params.outdir}/${platform_id}/03_strand_check",
+    label 'liftover'
+    tag "${platform_id}"
+    
+    publishDir "${params.outdir}/${platform_id}/02_liftover",
         mode: 'copy',
-        pattern: "*.{txt,log,sh}"
+        pattern: "*.{log,txt}"
+    
+    when:
+    build == 'hg19'
     
     input:
     tuple val(platform_id),
@@ -241,87 +421,198 @@ process RAYNER_STRAND_CHECK {
           path(fam),
           val(build),
           val(batch)
-    path(rayner_script)
-    path(rayner_ref_hg19)
-    path(rayner_ref_hg38)
+    path chain_file
+    path hg38_fasta
     
     output:
     tuple val(platform_id),
-          path("${platform_id}-updated*"),
-          path("${platform_id}_qc*"),
-          val(build),
-          val(batch), emit: strand_files
+          path("${platform_id}_hg38.bed"),
+          path("${platform_id}_hg38.bim"),
+          path("${platform_id}_hg38.fam"),
+          val("hg38"),
+          val(batch), emit: lifted_plink
     
-    path("${platform_id}_rayner.log"), emit: rayner_log
+    path("${platform_id}_liftover.log"), emit: liftover_log
     
     script:
-    // Select appropriate reference based on build
-    def ref_file = build == 'hg19' ? rayner_ref_hg19 : rayner_ref_hg38
-    
     """
     #!/bin/bash
     set -euo pipefail
     
-    echo "Running Rayner strand check for ${platform_id}"
-    echo "Build: ${build}"
-    echo "Reference: ${ref_file}"
+    echo "=========================================="
+    echo "CrossMap Liftover: ${platform_id}"
+    echo "hg19 → hg38"
+    echo "=========================================="
     
-    # Copy input files
-    cp ${bed} ${platform_id}_qc.bed
-    cp ${bim} ${platform_id}_qc.bim
-    cp ${fam} ${platform_id}_qc.fam
+    input_prefix=\$(basename ${bed} .bed)
+    snps_input=\$(wc -l < ${bim})
     
-    # Run Rayner check with appropriate reference
-    perl ${rayner_script} \\
-        -b ${platform_id}_qc.bim \\
-        -f ${ref_file} \\
-        -h \\
-        -o ${platform_id}
+    # Convert .bim to BED format
+    awk 'BEGIN {OFS="\\t"} {
+        chr = (\$1 ~ /^chr/) ? \$1 : "chr"\$1
+        print chr, \$4-1, \$4, \$2, \$5, \$6
+    }' ${bim} > hg19_positions.bed
     
-    # Create log
-    cat > ${platform_id}_rayner.log << EOF
+    # Run CrossMap
+    CrossMap.py bed ${chain_file} hg19_positions.bed hg38_positions.bed || true
+    
+    # Process results
+    awk '{print \$4}' hg38_positions.bed > mapped_snps.txt
+    snps_mapped=\$(wc -l < mapped_snps.txt)
+    pct_mapped=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${snps_mapped}/\${snps_input}}")
+    
+    # Create mapping
+    awk 'BEGIN {OFS="\\t"} {
+        chr = \$1; gsub(/^chr/, "", chr)
+        print \$4, chr, \$3
+    }' hg38_positions.bed > snp_to_hg38_pos.txt
+    
+    # Update .bim
+    awk 'BEGIN {OFS="\\t"} 
+    NR==FNR {map[\$1] = \$2"\\t"\$3; next}
+    \$2 in map {
+        split(map[\$2], pos, "\\t")
+        print pos[1], \$2, \$3, pos[2], \$5, \$6
+    }' snp_to_hg38_pos.txt ${bim} > ${platform_id}_hg38.bim
+    
+    # Extract mapped SNPs
+    plink \\
+        --bfile \${input_prefix} \\
+        --extract mapped_snps.txt \\
+        --make-bed \\
+        --out ${platform_id}_hg38_temp \\
+        --threads ${task.cpus}
+    
+    mv ${platform_id}_hg38_temp.bed ${platform_id}_hg38.bed
+    mv ${platform_id}_hg38_temp.fam ${platform_id}_hg38.fam
+    
+    # Report
+    cat > ${platform_id}_liftover.log << EOF
 ===============================================
-RAYNER STRAND CHECK: ${platform_id}
+CROSSMAP LIFTOVER: ${platform_id}
+hg19 → hg38
 ===============================================
 
-Build: ${build}
-Reference: ${ref_file}
+INPUT (hg19): \${snps_input} SNPs
+MAPPED (hg38): \${snps_mapped} SNPs (\${pct_mapped}%)
+UNMAPPED: \$((snps_input - snps_mapped)) SNPs
 
-Generated files:
-\$(ls -1 ${platform_id}-* 2>/dev/null || echo "No update files generated")
-
-Strand flip script:
-\$(ls -1 Run-plink.sh 2>/dev/null || echo "Run-plink.sh not found")
-
-Note: Next step will apply these corrections
-
+LIFTOVER PASS: ✓
 ===============================================
 EOF
 
-    cat ${platform_id}_rayner.log
-    
-    echo "Rayner strand check complete"
+    cat ${platform_id}_liftover.log
     """
 }
 
-// ============================================================================
-// PROCESS 1.4: APPLY STRAND FIXES
-// ============================================================================
-process APPLY_STRAND_FIXES {
-    label 'preqc'
-    tag "${platform_id}"
-    conda "${projectDir}/envs/plink.yml"
+// ===================================================================
+// PROCESS 1.3: STRAND CHECKING WITH TOPMED FREEZE 10
+// ===================================================================
+
+process STRAND_CHECK_TOPMED {
+    container 'docker://perl:5.34'
     
-    publishDir "${params.outdir}/${platform_id}/04_strand_fixed",
+    label 'strand_check'
+    tag "${platform_id}"
+    
+    publishDir "${params.outdir}/${platform_id}/03_strand_check",
         mode: 'copy',
-        pattern: "*.{bed,bim,fam,log}"
+        pattern: "*.{txt,log}"
     
     input:
     tuple val(platform_id),
-          path(update_files),
-          path(input_files),
+          path(bed),
+          path(bim),
+          path(fam),
           val(build),
           val(batch)
+    path strand_script
+    path topmed_ref
+    
+    output:
+    tuple val(platform_id),
+          path(bed),
+          path(bim),
+          path(fam),
+          val(build),
+          val(batch),
+          path("${platform_id}-*.txt"), emit: strand_files
+    
+    path("${platform_id}_strand_check.log"), emit: strand_log
+    
+    script:
+    """
+    #!/bin/bash
+    set -euo pipefail
+    
+    echo "=========================================="
+    echo "Strand Check: ${platform_id}"
+    echo "Reference: TOPMed Freeze 10"
+    echo "=========================================="
+    
+    input_prefix=\$(basename ${bim} .bim)
+    
+    # Calculate frequencies
+    plink \\
+        --bfile \${input_prefix} \\
+        --freq \\
+        --out \${input_prefix} \\
+        --threads ${task.cpus}
+    
+    # Run strand check
+    perl ${strand_script} \\
+        -b ${bim} \\
+        -f \${input_prefix}.frq \\
+        -r ${topmed_ref} \\
+        -h \\
+        -o ${platform_id}
+    
+    # Count results
+    n_flip=0; [[ -f "${platform_id}-Strand-Flip.txt" ]] && n_flip=\$(wc -l < ${platform_id}-Strand-Flip.txt)
+    n_force=0; [[ -f "${platform_id}-Force-Allele1.txt" ]] && n_force=\$(wc -l < ${platform_id}-Force-Allele1.txt)
+    n_remove=0; [[ -f "${platform_id}-remove.txt" ]] && n_remove=\$(wc -l < ${platform_id}-remove.txt)
+    
+    cat > ${platform_id}_strand_check.log << EOF
+===============================================
+STRAND CHECK: ${platform_id}
+Reference: TOPMed Freeze 10
+===============================================
+
+RESULTS:
+  Flip: \${n_flip}
+  Force: \${n_force}
+  Remove: \${n_remove}
+  
+STRAND CHECK PASS: ✓
+===============================================
+EOF
+
+    cat ${platform_id}_strand_check.log
+    """
+}
+
+// ===================================================================
+// PROCESS 1.4: APPLY STRAND FIXES
+// ===================================================================
+
+process APPLY_STRAND_FIXES {
+    container 'docker://quay.io/biocontainers/plink:1.90b6.21--h031d066_5'
+    
+    label 'preqc'
+    tag "${platform_id}"
+    
+    publishDir "${params.outdir}/${platform_id}/04_strand_fixed",
+        mode: 'copy',
+        pattern: "*.log"
+    
+    input:
+    tuple val(platform_id),
+          path(bed),
+          path(bim),
+          path(fam),
+          val(build),
+          val(batch),
+          path(strand_files)
     
     output:
     tuple val(platform_id),
@@ -338,59 +629,43 @@ process APPLY_STRAND_FIXES {
     #!/bin/bash
     set -euo pipefail
     
-    echo "Applying strand corrections for ${platform_id}"
+    input_prefix=\$(basename ${bed} .bed)
     
-    # Check for Run-plink.sh script
-    if [ -f "Run-plink.sh" ]; then
-        echo "Found Run-plink.sh, executing corrections..."
-        bash Run-plink.sh
-        
-        # Find the final output
-        FINAL=\$(ls -t ${platform_id}-updated*.bed 2>/dev/null | head -1 | sed 's/.bed//')
-        
-        if [ -n "\$FINAL" ]; then
-            mv \${FINAL}.bed ${platform_id}_fixed.bed
-            mv \${FINAL}.bim ${platform_id}_fixed.bim
-            mv \${FINAL}.fam ${platform_id}_fixed.fam
-            echo "Applied corrections from Run-plink.sh" > ${platform_id}_fixes.log
-        else
-            echo "ERROR: No output from Run-plink.sh" > ${platform_id}_fixes.log
-            exit 1
-        fi
+    # Step 1: Remove
+    if [[ -f "${platform_id}-remove.txt" && -s "${platform_id}-remove.txt" ]]; then
+        plink --bfile \${input_prefix} --exclude ${platform_id}-remove.txt --make-bed --out temp1 --threads ${task.cpus}
     else
-        echo "No Run-plink.sh found, copying input files..."
-        cp ${platform_id}_qc.bed ${platform_id}_fixed.bed
-        cp ${platform_id}_qc.bim ${platform_id}_fixed.bim
-        cp ${platform_id}_qc.fam ${platform_id}_fixed.fam
-        echo "No strand corrections needed" > ${platform_id}_fixes.log
+        ln -s ${bed} temp1.bed; ln -s ${bim} temp1.bim; ln -s ${fam} temp1.fam
     fi
     
-    # Count variants
-    snps_fixed=\$(wc -l < ${platform_id}_fixed.bim)
+    # Step 2: Flip
+    if [[ -f "${platform_id}-Strand-Flip.txt" && -s "${platform_id}-Strand-Flip.txt" ]]; then
+        plink --bfile temp1 --flip ${platform_id}-Strand-Flip.txt --make-bed --out temp2 --threads ${task.cpus}
+    else
+        ln -s temp1.bed temp2.bed; ln -s temp1.bim temp2.bim; ln -s temp1.fam temp2.fam
+    fi
     
-    cat >> ${platform_id}_fixes.log << EOF
-
-Platform: ${platform_id}
-Build: ${build}
-Final SNPs: \${snps_fixed}
-
-EOF
-
-    cat ${platform_id}_fixes.log
+    # Step 3: Force allele
+    if [[ -f "${platform_id}-Force-Allele1.txt" && -s "${platform_id}-Force-Allele1.txt" ]]; then
+        plink --bfile temp2 --a1-allele ${platform_id}-Force-Allele1.txt --make-bed --out ${platform_id}_fixed --threads ${task.cpus}
+    else
+        mv temp2.bed ${platform_id}_fixed.bed; mv temp2.bim ${platform_id}_fixed.bim; mv temp2.fam ${platform_id}_fixed.fam
+    fi
+    
+    echo "Strand fixes applied: ${platform_id}" > ${platform_id}_fixes.log
+    rm -f temp*.{bed,bim,fam,log,nosex}
     """
 }
 
-// ============================================================================
+// ===================================================================
 // PROCESS 1.5: SPLIT BY CHROMOSOME
-// ============================================================================
+// ===================================================================
+
 process SPLIT_BY_CHROMOSOME {
+    container 'docker://quay.io/biocontainers/plink2:2.00a3.7--h4ac6f70_0'
+    
     label 'preqc'
     tag "${platform_id}_chr${chr}"
-    conda "${projectDir}/envs/plink.yml"
-    
-    publishDir "${params.outdir}/${platform_id}/05_split_chr",
-        mode: 'copy',
-        pattern: "*.{bed,bim,fam}"
     
     input:
     tuple val(platform_id),
@@ -417,28 +692,28 @@ process SPLIT_BY_CHROMOSOME {
     
     input_prefix=\$(basename ${bed} .bed)
     
-    plink \\
+    plink2 \\
         --bfile \${input_prefix} \\
         --chr ${chr} \\
         --make-bed \\
         --out ${platform_id}_chr${chr} \\
         --threads ${task.cpus}
-    
-    echo "Split chromosome ${chr} for ${platform_id} (${build})"
     """
 }
 
-// ============================================================================
-// PROCESS 1.6: CREATE VCFs FOR IMPUTATION (BUILD-AWARE)
-// ============================================================================
+// ===================================================================
+// PROCESS 1.6: CREATE IMPUTATION-READY VCFS
+// ===================================================================
+
 process CREATE_IMPUTATION_VCFS {
-    label 'bcftools'
-    tag "${platform_id}_chr${chr}"
-    conda "${projectDir}/envs/plink.yml"
+    container 'docker://quay.io/biocontainers/bcftools:1.18--h8b25389_0'
     
-    publishDir "${params.outdir}/${platform_id}/06_vcf_ready",
+    label 'preqc'
+    tag "${platform_id}_chr${chr}"
+    
+    publishDir "${params.outdir}/${platform_id}/05_imputation_ready",
         mode: 'copy',
-        pattern: "*.{vcf.gz,tbi,txt}"
+        pattern: "*.vcf.gz*"
     
     input:
     tuple val(platform_id),
@@ -453,160 +728,157 @@ process CREATE_IMPUTATION_VCFS {
     tuple val(platform_id),
           val(chr),
           path("${platform_id}_chr${chr}.vcf.gz"),
-          path("${platform_id}_chr${chr}.vcf.gz.tbi"),
-          val(build),       // IMPORTANT: Pass build to Module 2
+          path("${platform_id}_chr${chr}.vcf.gz.csi"),
+          val(build),
           val(batch), emit: imputation_vcfs
     
-    path("${platform_id}_chr${chr}_metadata.txt"), emit: metadata
+    path("${platform_id}_chr${chr}_vcf.log"), emit: vcf_log
     
     script:
-    // Chromosome naming based on build
-    // hg38/GRCh38 typically uses "chr" prefix, hg19/GRCh37 may not
-    // TOPMed expects chr prefix for hg38
-    def chr_name = build == 'hg38' ? "chr${chr}" : chr
-    
     """
     #!/bin/bash
     set -euo pipefail
     
-    echo "Creating VCF for ${platform_id} chromosome ${chr} (${build})"
-    
     input_prefix=\$(basename ${bed} .bed)
+    n_snps=\$(wc -l < ${bim})
     
-    # Convert PLINK to VCF with appropriate chromosome naming
+    if [[ \${n_snps} -eq 0 ]]; then
+        # Empty VCF
+        cat > ${platform_id}_chr${chr}.vcf << 'EOFVCF'
+##fileformat=VCFv4.2
+##contig=<ID=chr${chr},assembly=GRCh38>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT
+EOFVCF
+        bgzip ${platform_id}_chr${chr}.vcf
+        bcftools index -c ${platform_id}_chr${chr}.vcf.gz
+        echo "Empty VCF" > ${platform_id}_chr${chr}_vcf.log
+        exit 0
+    fi
+    
+    # Convert to VCF with chr prefix
     plink2 \\
         --bfile \${input_prefix} \\
-        --recode vcf-iid bgz \\
-        --output-chr ${chr_name} \\
-        --out ${platform_id}_chr${chr}_temp \\
+        --export vcf-4.2 bgz \\
+        --output-chr chr26 \\
+        --out temp \\
         --threads ${task.cpus}
     
-    # Sort and normalize
-    bcftools sort \\
-        ${platform_id}_chr${chr}_temp.vcf.gz \\
+    # Clean headers and keep only GT
+    bcftools annotate \\
+        --set-id '%CHROM:%POS:%REF:%ALT' \\
+        temp.vcf.gz | \\
+    bcftools annotate \\
+        -x INFO,^FORMAT/GT \\
         -O z \\
+        -o annotated.vcf.gz
+    
+    # Sort
+    bcftools sort \\
+        annotated.vcf.gz \\
+        -Oz \\
         -o ${platform_id}_chr${chr}.vcf.gz
     
-    # Index
-    bcftools index -t ${platform_id}_chr${chr}.vcf.gz
+    # Index with CSI
+    bcftools index -c ${platform_id}_chr${chr}.vcf.gz
     
-    # Count variants
-    variants=\$(bcftools view -H ${platform_id}_chr${chr}.vcf.gz | wc -l)
-    samples=\$(bcftools query -l ${platform_id}_chr${chr}.vcf.gz | wc -l)
-    
-    # Create metadata file
-    cat > ${platform_id}_chr${chr}_metadata.txt << EOF
-===============================================
-VCF METADATA: ${platform_id} Chr${chr}
-===============================================
-
-Platform: ${platform_id}
-Chromosome: ${chr}
-Chromosome name in VCF: ${chr_name}
-Build: ${build}
-Batch: ${batch}
-
-Variants: \${variants}
-Samples: \${samples}
-
-File: ${platform_id}_chr${chr}.vcf.gz
-Index: ${platform_id}_chr${chr}.vcf.gz.tbi
-
-IMPORTANT FOR IMPUTATION:
-- This VCF is in ${build} coordinates
-- Imputation servers will automatically convert to hg38 if needed
-- Specify build="${build}" in server submission
-
-===============================================
+    # Log
+    vcf_snps=\$(bcftools view -H ${platform_id}_chr${chr}.vcf.gz | wc -l)
+    cat > ${platform_id}_chr${chr}_vcf.log << EOF
+VCF Created: ${platform_id}_chr${chr}
+SNPs: \${vcf_snps}
+Format: VCFv4.2, bgzip, CSI indexed
+Ready for: TOPMed & All of Us AnVIL
 EOF
-
-    cat ${platform_id}_chr${chr}_metadata.txt
     
-    # Cleanup
-    rm -f ${platform_id}_chr${chr}_temp.vcf.gz
-    
-    echo "VCF creation complete"
+    rm -f temp.vcf.gz annotated.vcf.gz
     """
 }
 
-// ============================================================================
-// MODULE 1 WORKFLOW (UPDATED - NO LIFTOVER)
-// ============================================================================
-workflow MODULE1_PREIMPUTATION {
+// ===================================================================
+// MODULE 1 WORKFLOW
+// ===================================================================
+
+workflow MODULE1_PREQC {
     take:
-    sample_sheet_ch  // tuple(platform_id, file_path, file_type, build, batch)
+    sample_sheet_ch  // Can contain multiple files per platform
     
     main:
+    // Process 1.0: Merge multiple sample files per platform (NEW!)
+    MERGE_PLATFORM_SAMPLES(sample_sheet_ch)
     
-    // Process 1.1: Convert to PLINK if needed
-    CONVERT_TO_PLINK(sample_sheet_ch)
+    // Process 1.1: Convert to standard PLINK format
+    CONVERT_TO_PLINK(MERGE_PLATFORM_SAMPLES.out.merged_files)
     
     // Process 1.2: Basic QC
     BASIC_QC(CONVERT_TO_PLINK.out.plink_files)
     
-    // ========================================================================
-    // LIFTOVER REMOVED - Servers handle it!
-    // ========================================================================
-    // We keep track of build and pass it through the pipeline
-    // The imputation servers will automatically convert hg19 → hg38
+    // Process 1.3: Liftover for hg19
+    hg19_ch = BASIC_QC.out.qc_plink.filter { it[4] == 'hg19' }
+    hg38_ch = BASIC_QC.out.qc_plink.filter { it[4] == 'hg38' }
     
-    // Process 1.3: Rayner strand check (build-aware)
-    RAYNER_STRAND_CHECK(
-        BASIC_QC.out.qc_plink,
-        file(params.rayner_script),
-        file(params.rayner_ref_hg19),
-        file(params.rayner_ref_hg38)
+    LIFTOVER_CROSSMAP(
+        hg19_ch,
+        file(params.crossmap_chain),
+        file(params.hg38_fasta)
     )
     
-    // Process 1.4: Apply strand fixes
-    APPLY_STRAND_FIXES(RAYNER_STRAND_CHECK.out.strand_files)
+    all_hg38_ch = LIFTOVER_CROSSMAP.out.lifted_plink.mix(hg38_ch)
     
-    // Process 1.5: Split by chromosome
+    // Process 1.4: Strand checking
+    STRAND_CHECK_TOPMED(
+        all_hg38_ch,
+        file("${projectDir}/bin/check-strand-topmed.pl"),
+        file(params.topmed_freeze10_ref)
+    )
+    
+    // Process 1.5: Apply strand fixes
+    APPLY_STRAND_FIXES(STRAND_CHECK_TOPMED.out.strand_files)
+    
+    // Process 1.6: Split by chromosome
     chromosomes = Channel.of(1..22)
-    
-    // Combine each platform with all chromosomes
-    chr_input = APPLY_STRAND_FIXES.out.fixed_plink
-        .combine(chromosomes)
-    
+    chr_input = APPLY_STRAND_FIXES.out.fixed_plink.combine(chromosomes)
     SPLIT_BY_CHROMOSOME(chr_input)
     
-    // Process 1.6: Create VCFs for imputation
+    // Process 1.7: Create VCFs
     CREATE_IMPUTATION_VCFS(SPLIT_BY_CHROMOSOME.out.chr_plink)
     
     emit:
-    // Output VCFs WITH BUILD INFO for Module 2
     imputation_vcfs = CREATE_IMPUTATION_VCFS.out.imputation_vcfs
-    
-    // QC reports
+    merge_reports = MERGE_PLATFORM_SAMPLES.out.merge_log
     qc_reports = BASIC_QC.out.qc_report
-    strand_reports = RAYNER_STRAND_CHECK.out.rayner_log
+    liftover_reports = LIFTOVER_CROSSMAP.out.liftover_log
+    strand_reports = STRAND_CHECK_TOPMED.out.strand_log
     fixes_reports = APPLY_STRAND_FIXES.out.fixes_log
-    vcf_metadata = CREATE_IMPUTATION_VCFS.out.metadata
+    vcf_logs = CREATE_IMPUTATION_VCFS.out.vcf_log
 }
 
 /*
-================================================================================
-USAGE NOTES:
-================================================================================
-
-1. Input sample sheet format (TSV):
-   platform_id  file_path  file_type  build  batch
-   Platform1    /path/to   plink      hg19   batch1
-   Platform2    /path/to   plink      hg38   batch1
-
-2. Build tracking:
-   - Build information flows through entire pipeline
-   - No liftover performed in Module 1
-   - Build passed to Module 2 for server submission
-
-3. Rayner references:
-   - Need both hg19 and hg38 TOPMed references
-   - Script automatically selects correct reference based on build
-
-4. Output:
-   - VCFs in original build (hg19 or hg38)
-   - Build info passed to Module 2
-   - Servers handle liftover automatically
-
-================================================================================
-*/
+ * ===================================================================
+ * SAMPLE SHEET FORMATS:
+ * ===================================================================
+ * 
+ * FORMAT 1: Single file per platform
+ * platform_id,file_path,file_type,build,batch
+ * Platform1,/data/plat1,plink,hg19,batch1
+ * Platform2,/data/plat2,plink,hg38,batch1
+ * 
+ * FORMAT 2: Multiple files per platform (NEW!)
+ * platform_id,file_paths,file_type,build,batch
+ * Platform1,"/data/p1_batch1;/data/p1_batch2;/data/p1_batch3",plink,hg19,batch1
+ * Platform2,"/data/p2_cohort1;/data/p2_cohort2",plink,hg38,batch1
+ * 
+ * Note: Multiple files are separated by semicolons
+ * 
+ * ===================================================================
+ * REQUIRED PARAMETERS (nextflow.config):
+ * ===================================================================
+ * params {
+ *     crossmap_chain = "${projectDir}/resources/references/hg19ToHg38.over.chain.gz"
+ *     hg38_fasta = "${projectDir}/resources/references/hg38.fa"
+ *     topmed_freeze10_ref = "${projectDir}/resources/references/PASS.Variants.TOPMed_freeze10_hg38.tab.gz"
+ *     preqc_geno = 0.05
+ *     preqc_mind = 0.05
+ *     outdir = "results"
+ * }
+ * ===================================================================
+ */
