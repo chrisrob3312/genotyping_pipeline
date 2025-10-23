@@ -72,37 +72,75 @@ This pipeline uses **5 Apptainer containers** for reproducibility and portabilit
 
 ## 📦 Repository Structure
 
-```
 genotyping-imputation-pipeline/
+├── README.md
+├── LICENSE
+├── .gitignore
+│
 ├── main.nf                          # Main workflow
-├── nextflow.config                  # Configuration with Apptainer settings
-├── modules/                         # Pipeline modules
+├── nextflow.config                  # Configuration with Apptainer/Singularity
+│
+├── modules/                         # All .nf module files
 │   ├── Module1_PreImputation.nf
-│   ├── Module2_Imputation.nf
-│   ├── Module3_PostQC.nf
-│   ├── Module4_Merging.nf
-│   ├── Module5_Reimputation.nf
-│   ├── Module6_PostMergeQC.nf
-│   └── Module7_Ancestry.nf
-├── containers/                      # Apptainer definitions
+│   ├── Module2_Imputation.nf       # DUAL WORKFLOW VERSION
+│   ├── Module3_PostQC.nf           # DUAL WORKFLOW VERSION
+│   ├── Module4_Merging.nf          # DUAL WORKFLOW VERSION
+│   ├── Module5_Reimputation.nf     # DUAL WORKFLOW VERSION
+│   ├── Module6_PostMergeQC.nf      # DUAL WORKFLOW VERSION
+│   └── Module7_Ancestry.nf         # DUAL WORKFLOW VERSION
+│
+├── bin/                            # ⭐ Helper scripts
+│   ├── check-topmed-strands.pl     # Will Rayner's HRC-1000G-check-bim.pl
+│   ├── magicalrsqx_filter.R        # MagicalRsq-X filtering
+│   ├── compare_imputation.R        # Compare TOPMed vs AnVIL
+│   ├── pcrelate_qc.R               # GENESIS relatedness
+│   ├── het_filter.R                # Heterozygosity filtering
+│   └── imputation_api.py           # API helper functions
+│
+├── containers/                      # ⭐ Apptainer definitions
 │   ├── plink.def
-│   ├── r_genetics.def
-│   ├── perl_vcftools.def
-│   ├── ancestry_tools.def
-│   ├── python_tools.def
-│   └── build_containers.sh          # Automated build script
-├── references/                      # Reference files (user-provided)
-│   ├── hg38.fa
-│   ├── hg19ToHg38.over.chain.gz
-│   ├── PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz
-│   ├── genetic_maps/
-│   └── ancestry_reference_panel.rds
-├── bin/                            # Utility scripts
-└── docs/                           # Documentation
-    ├── SETUP_GUIDE.md
-    ├── MODULE_DETAILS.md
-    └── TROUBLESHOOTING.md
-```
+│   ├── r_analysis.def              # With MagicalRsq-X
+│   ├── bcftools.def
+│   ├── python_api.def
+│   ├── admixture.def
+│   └── rfmix.def
+│
+├── resources/                       # ⭐ Reference data
+│   ├── references/                  # Main references directory
+│   │   ├── hg38.fa                 # Human reference (download separately)
+│   │   ├── hg38.fa.fai
+│   │   ├── hg19ToHg38.over.chain.gz
+│   │   ├── TOPMed_freq/            # TOPMed frequency files
+│   │   │   └── PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab
+│   │   ├── genetic_maps/           # For RFMix
+│   │   │   ├── chr1.map
+│   │   │   ├── chr2.map
+│   │   │   └── ...
+│   │   └── ancestry_panels/        # Ancestry reference panels
+│   │       ├── admixture_ref/
+│   │       └── rfmix_ref/
+│   └── .gitkeep
+│
+├── submodules/                      # ⭐ Git submodules
+│   └── graf-anc/                   # Graf-anc with its own references
+│       └── (submodule with its own structure)
+│
+├── docs/                            # Documentation
+│   ├── INSTALLATION.md
+│   ├── USAGE.md
+│   ├── API_SETUP.md
+│   ├── DUAL_WORKFLOW_COMPARISON.md # NEW: Comparing TOPMed vs AnVIL
+│   └── TROUBLESHOOTING.md
+│
+├── examples/                        # Example run scripts
+│   ├── run_topmed_only.sh
+│   ├── run_anvil_only.sh
+│   ├── run_both_parallel.sh
+│   └── sample_sheet.tsv
+│
+└── test/                            # Test data
+    ├── test_data/
+    └── run_test.sh
 
 ---
 
