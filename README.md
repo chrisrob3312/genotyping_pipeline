@@ -30,7 +30,7 @@ This pipeline uses **5 Apptainer containers** for reproducibility and portabilit
 | **plink.sif** | PLINK 1.9, PLINK 2.0 | 1, 3, 4, 6, 7 |
 | **r_genetics.sif** | R 4.3.1, GENESIS, MagicalRsq, tidyverse, ggplot2 | 3, 6, 7 |
 | **perl_vcftools.sif** | Perl, bcftools, vcftools, CrossMap, htslib | 1, 3, 4, 5, 6 |
-| **ancestry_tools.sif** | ADMIXTURE, RFMix v1/v2, FLARE, g-nomix, Graf-anc, SHAPEIT4, Eagle, TRACTOR | 7 |
+| **ancestry_tools.sif** | ADMIXTURE, RFMix v1/v2, FLARE, g-nomix, Graf-anc, SHAPEIT4, Eagle | 7 |
 | **python_tools.sif** | Python 3.10, pandas, pysam, API libraries, terra-notebook-utils | 2, 5 |
 
 ### Software by Module
