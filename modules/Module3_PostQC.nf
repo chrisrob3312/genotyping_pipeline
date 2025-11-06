@@ -1,567 +1,658 @@
-// Module 2: Imputation Submission and Retrieval
-// Version: 2.0 - 15-minute monitoring, extended time limits
-// Parallelized: All platforms × Both services (TOPMed + All of Us)
+// Module 3: Post-Imputation QC
+// UPDATED: Added VCF indexing and formatting at the beginning
+// Uses R package MagicalRsq for variant quality filtering
+// Parallelized across all platforms
 
 // ============================================================================
-// PROCESS 1: Submit to TOPMed Imputation Server via API
+// PROCESS 0: Index imputed VCF files from Module 2
 // ============================================================================
-// What this does: Submits your VCF files to the TOPMed imputation server
-// - Uses the Michigan Imputation Server API
-// - Uploads all chromosome VCFs for a platform
-// - Configures imputation parameters (reference panel, phasing method, etc.)
-
-process submitTOPMedImputation {
-    label 'api'
-    tag "${platform}"
-    publishDir "${params.outdir}/module2/01_topmed_jobs/${platform}", mode: 'copy'
-    
-    when:
-    params.run_topmed
+process indexImputedVCFs {
+    label 'bcftools'
+    tag "${platform}_chr${chr}"
+    publishDir "${params.outdir}/module3/00_indexed/${platform}", mode: 'copy'
     
     input:
-    tuple val(platform), path(vcf_files), path(tbi_files)
-    tuple val(platform2), path(manifest), path(anvil_manifest), path(file_list)
+    tuple val(platform), val(chr), path(vcf), path(info)
     
     output:
-    tuple val(platform), 
-          path("${platform}_topmed_job.json"),
-          emit: job_info
+    tuple val(platform), val(chr), 
+          path(vcf), 
+          path("${vcf}.tbi"), 
+          path(info),
+          emit: indexed_vcfs
     
     script:
     """
-    #!/usr/bin/env python3
-    import requests
-    import json
-    import os
+    # Create tabix index for the VCF file
+    # This is required because Module 2 imputation servers don't return indexed files
+    echo "Indexing ${vcf}..."
+    bcftools index -t ${vcf}
     
-    # Read API token from parameters
-    token = "${params.topmed_api_token}"
-    if not token or token == "null":
-        raise ValueError("TOPMed API token required. Set params.topmed_api_token")
+    # Verify index was created
+    if [ ! -f "${vcf}.tbi" ]; then
+        echo "ERROR: Failed to create index for ${vcf}"
+        exit 1
+    fi
     
-    # Set up API authentication
-    headers = {'X-Auth-Token': token}
-    base_url = 'https://imputation.biodatacatalyst.nhlbi.nih.gov/api/v2'
+    echo "Successfully indexed ${vcf}"
+    """
+}
+
+// ============================================================================
+// PROCESS 1: Filter variants with MagicalRsq (R² >= 0.3)
+// ============================================================================
+process magicalRsqFilter {
+    label 'R'
+    tag "${platform}_chr${chr}"
+    publishDir "${params.outdir}/module3/01_rsq_filtered/${platform}", mode: 'copy'
     
-    # Load job configuration from manifest
-    with open('${manifest}') as f:
-        job_config = json.load(f)
+    input:
+    tuple val(platform), val(chr), path(vcf), path(tbi), path(info)
     
-    # Get list of VCF files to upload
-    vcf_list = [f for f in '${vcf_files}'.split() if f.endswith('.vcf.gz')]
+    output:
+    tuple val(platform), val(chr),
+          path("${platform}_chr${chr}_rsq0.3.vcf.gz"),
+          path("${platform}_chr${chr}_rsq0.3.vcf.gz.tbi"),
+          path("${platform}_chr${chr}_rsq_stats.txt"),
+          emit: filtered_vcf
     
-    # Prepare files for multipart upload
-    # Each VCF is uploaded as a separate file in the request
-    files = [('files', (os.path.basename(vcf), open(vcf, 'rb'))) 
-             for vcf in vcf_list]
+    script:
+    """
+    #!/usr/bin/env Rscript
     
-    # Submit imputation job to server
-    response = requests.post(
-        f'{base_url}/jobs/submit/imputationserver',
-        headers=headers,
-        data=job_config,
-        files=files
+    library(MagicalRsq)
+    library(data.table)
+    
+    cat("Processing chromosome ${chr} for platform ${platform}\\n")
+    cat("Input VCF: ${vcf}\\n")
+    cat("Input INFO: ${info}\\n")
+    
+    # Read imputation info file
+    info <- fread("${info}")
+    cat("Read", nrow(info), "variants from info file\\n")
+    
+    # Calculate MagicalRsq (empirical R²)
+    # This accounts for LD and provides better quality metric than standard Rsq
+    # MagicalRsq-X features include:
+    # - LD scores from TOP-LD (4 populations, long-range ±1Mb and short-range ±100kb)
+    # - Recombination rates from 1000 Genomes
+    # - Ancestry-specific MAF
+    # - S/HIC features (selection/haplotype scores)
+    # NO ANCESTRY INPUT REQUIRED - model uses all population LD scores automatically
+    
+    cat("Calculating MagicalRsq values...\\n")
+    info\$magical_rsq <- calculate_magical_rsq(
+        info\$Rsq,           # Server-reported R²
+        info\$MAF,           # Minor allele frequency
+        info\$Genotyped      # Whether variant was genotyped
     )
     
-    # Check if submission was successful
-    if response.status_code != 200:
-        raise Exception(f"Submission failed: {response.text}")
+    # Filter: MagicalRsq >= 0.3
+    pass_variants <- info[magical_rsq >= 0.3, ]
+    cat("Variants passing filter:", nrow(pass_variants), "/", nrow(info), "\\n")
     
-    # Save job information for monitoring
-    job_data = response.json()
-    job_data['platform'] = '${platform}'
+    # Save statistics
+    stats <- data.frame(
+        chromosome = "${chr}",
+        platform = "${platform}",
+        total_variants = nrow(info),
+        pass_variants = nrow(pass_variants),
+        filtered_variants = nrow(info) - nrow(pass_variants),
+        pct_pass = 100 * nrow(pass_variants) / nrow(info),
+        mean_rsq = mean(info\$Rsq),
+        mean_magical_rsq = mean(info\$magical_rsq),
+        mean_rsq_pass = mean(pass_variants\$magical_rsq)
+    )
+    write.table(stats, "${platform}_chr${chr}_rsq_stats.txt", 
+                quote=FALSE, row.names=FALSE, sep="\\t")
     
-    with open('${platform}_topmed_job.json', 'w') as f:
-        json.dump(job_data, f, indent=2)
+    # Write variant IDs to keep
+    write.table(pass_variants\$ID, "variants_to_keep.txt", 
+                quote=FALSE, row.names=FALSE, col.names=FALSE)
     
-    print(f"Job submitted successfully!")
-    print(f"Job ID: {job_data['id']}")
-    print(f"Status: {job_data.get('state', 'pending')}")
+    # Filter VCF with bcftools
+    cat("Filtering VCF with bcftools...\\n")
+    system("bcftools view -i 'ID=@variants_to_keep.txt' ${vcf} -Oz -o ${platform}_chr${chr}_rsq0.3.vcf.gz")
+    system("bcftools index -t ${platform}_chr${chr}_rsq0.3.vcf.gz")
+    
+    cat("\\n=== MagicalRsq Filtering Complete ===\\n")
+    cat("Filtered from", nrow(info), "to", nrow(pass_variants), "variants\\n")
+    cat("Percentage retained:", sprintf("%.2f%%", 100 * nrow(pass_variants) / nrow(info)), "\\n")
     """
 }
 
 // ============================================================================
-// PROCESS 2: Monitor TOPMed job completion
+// PROCESS 2: Calculate sample and genotype call rates
 // ============================================================================
-// What this does: Periodically checks if imputation job has completed
-// - Checks status every 15 minutes (params.monitor_interval)
-// - Retries up to 200 times (allows ~50 hours of monitoring)
-// - States: 1=waiting, 2=running, 3=exporting, 4=success, 5=failed, 6=canceled
-
-process monitorTOPMedJob {
-    label 'api'
-    tag "${platform}"
-    maxRetries 200  // 200 × 15 min = 50 hours maximum monitoring
-    errorStrategy 'retry'
-    
-    when:
-    params.run_topmed
+process calculateCallRates {
+    label 'bcftools'
+    tag "${platform}_chr${chr}"
+    publishDir "${params.outdir}/module3/02_call_rates/${platform}", mode: 'copy'
     
     input:
-    tuple val(platform), path(job_info)
+    tuple val(platform), val(chr), path(vcf), path(tbi), path(stats)
     
     output:
-    tuple val(platform), path(job_info), emit: completed_job
+    tuple val(platform), val(chr), path(vcf), path(tbi),
+          path("${platform}_chr${chr}_sample_call_rate.txt"),
+          path("${platform}_chr${chr}_variant_call_rate.txt"),
+          emit: with_call_rates
     
     script:
     """
-    #!/usr/bin/env python3
-    import requests
-    import json
-    import time
-    import sys
+    echo "Calculating call rates for ${platform} chromosome ${chr}..."
     
-    # Set up API authentication
-    token = "${params.topmed_api_token}"
-    headers = {'X-Auth-Token': token}
-    base_url = 'https://imputation.biodatacatalyst.nhlbi.nih.gov/api/v2'
+    # Calculate per-sample call rate
+    # Call rate = (# of called genotypes) / (# of total genotypes)
+    bcftools query -f '[%SAMPLE\\t%GT\\n]' ${vcf} | \\
+        awk '{
+            sample=\$1; gt=\$2
+            total[sample]++
+            if (gt != "./." && gt != ".|.") called[sample]++
+        } END {
+            for (s in total) {
+                call_rate = (called[s] > 0) ? called[s]/total[s] : 0
+                print s, call_rate
+            }
+        }' > ${platform}_chr${chr}_sample_call_rate.txt
     
-    # Load job information
-    with open('${job_info}') as f:
-        job = json.load(f)
+    # Calculate per-variant call rate
+    # F_MISSING is fraction missing, so call rate = 1 - F_MISSING
+    bcftools query -f '%ID\\t%F_MISSING\\n' ${vcf} | \\
+        awk '{print \$1, 1-\$2}' > ${platform}_chr${chr}_variant_call_rate.txt
     
-    job_id = job['id']
-    
-    # Query current job status from API
-    response = requests.get(f'{base_url}/jobs/{job_id}', headers=headers)
-    status = response.json()
-    
-    state = status.get('state')
-    print(f"Job {job_id} current state: {state}")
-    
-    # State codes from Michigan Imputation Server:
-    # 1 = waiting in queue
-    # 2 = running (actively imputing)
-    # 3 = exporting results
-    # 4 = success (completed)
-    # 5 = failed
-    # 6 = canceled
-    
-    if state == 4:  # Success
-        print("✓ Job completed successfully!")
-        sys.exit(0)
-    elif state in [5, 6]:  # Failed or canceled
-        error_msg = status.get('message', 'Unknown error')
-        print(f"✗ Job failed: {error_msg}")
-        sys.exit(1)
-    else:  # Still running (states 1, 2, 3)
-        print(f"Job still processing... will check again in ${params.monitor_interval / 60} minutes")
-        # Wait for monitoring interval (default 15 minutes)
-        time.sleep(${params.monitor_interval})
-        sys.exit(100)  # Exit code 100 triggers retry
+    echo "Call rate calculation complete"
+    echo "Sample call rates written to: ${platform}_chr${chr}_sample_call_rate.txt"
+    echo "Variant call rates written to: ${platform}_chr${chr}_variant_call_rate.txt"
     """
 }
 
 // ============================================================================
-// PROCESS 3: Download TOPMed results
+// PROCESS 3: Filter samples with <95% call rate
 // ============================================================================
-// What this does: Downloads imputed data from TOPMed server
-// - Downloads all chromosome files (.dose.vcf.gz and .info.gz)
-// - Decrypts password-protected archives
-// - Renames files to standardized format for downstream processing
-
-process downloadTOPMedResults {
-    label 'download'
+process filterLowCallRateSamples {
+    label 'bcftools'
     tag "${platform}"
-    publishDir "${params.outdir}/module2/02_topmed_results/${platform}", mode: 'copy'
-    
-    when:
-    params.run_topmed
+    publishDir "${params.outdir}/module3/03_sample_filtered/${platform}", mode: 'copy'
     
     input:
-    tuple val(platform), path(job_info)
+    tuple val(platform), path(vcfs), path(tbis), path(sample_call_rates)
+    
+    output:
+    tuple val(platform),
+          path("${platform}_chr*_sample_qc.vcf.gz"),
+          path("${platform}_chr*_sample_qc.vcf.gz.tbi"),
+          path("${platform}_removed_samples.txt"),
+          path("${platform}_sample_qc_stats.txt"),
+          emit: sample_filtered
+    
+    script:
+    """
+    echo "Filtering low call rate samples for ${platform}..."
+    
+    # Merge all chromosome call rates to get genome-wide call rate per sample
+    # Average call rate across all chromosomes
+    cat ${sample_call_rates} | \\
+        awk '{sample[\$1]+=\$2; count[\$1]++} 
+             END {for (s in sample) print s, sample[s]/count[s]}' | \\
+        sort -k2,2n > ${platform}_genome_wide_call_rates.txt
+    
+    # Identify samples with <95% call rate
+    awk '\$2 < 0.95 {print \$1}' ${platform}_genome_wide_call_rates.txt > ${platform}_removed_samples.txt
+    
+    # Count samples
+    total_samples=\$(wc -l < ${platform}_genome_wide_call_rates.txt)
+    removed_samples=\$(wc -l < ${platform}_removed_samples.txt)
+    retained_samples=\$((total_samples - removed_samples))
+    
+    # Create stats file
+    cat > ${platform}_sample_qc_stats.txt <<EOF
+Metric\tValue
+Total samples\t\${total_samples}
+Samples removed (<95% call rate)\t\${removed_samples}
+Samples retained\t\${retained_samples}
+Percentage retained\t\$(awk "BEGIN {printf \\"%.2f\\", 100*\${retained_samples}/\${total_samples}}")%
+EOF
+    
+    echo "Sample QC Statistics:"
+    cat ${platform}_sample_qc_stats.txt
+    
+    # Filter each chromosome VCF to remove low call rate samples
+    for vcf in ${vcfs}; do
+        chr=\$(basename \$vcf | sed 's/.*chr\\([0-9XY]*\\).*/\\1/')
+        out="${platform}_chr\${chr}_sample_qc.vcf.gz"
+        
+        echo "Processing chromosome \${chr}..."
+        
+        if [ -s ${platform}_removed_samples.txt ]; then
+            # Remove samples listed in file
+            bcftools view -S ^${platform}_removed_samples.txt \$vcf -Oz -o \$out
+        else
+            # No samples to remove, just copy
+            echo "No samples to remove for chr\${chr}"
+            cp \$vcf \$out
+        fi
+        
+        # Index the filtered VCF
+        bcftools index -t \$out
+    done
+    
+    echo "\\n=== Sample Filtering Complete ==="
+    echo "Removed \${removed_samples} samples with <95% call rate"
+    echo "Retained \${retained_samples} samples"
+    """
+}
+
+// ============================================================================
+// PROCESS 4: Filter variants with <95% call rate
+// ============================================================================
+process filterLowCallRateVariants {
+    label 'bcftools'
+    tag "${platform}_chr${chr}"
+    publishDir "${params.outdir}/module3/04_variant_filtered/${platform}", mode: 'copy'
+    
+    input:
+    tuple val(platform), val(chr), path(vcf), path(tbi), path(variant_call_rate)
+    
+    output:
+    tuple val(platform), val(chr),
+          path("${platform}_chr${chr}_qc.vcf.gz"),
+          path("${platform}_chr${chr}_qc.vcf.gz.tbi"),
+          path("${platform}_chr${chr}_removed_variants.txt"),
+          path("${platform}_chr${chr}_variant_qc_stats.txt"),
+          emit: variant_filtered
+    
+    script:
+    """
+    echo "Filtering low call rate variants for ${platform} chromosome ${chr}..."
+    
+    # Count total variants
+    total_variants=\$(wc -l < ${variant_call_rate})
+    
+    # Identify variants with <95% call rate
+    awk '\$2 < 0.95 {print \$1}' ${variant_call_rate} > ${platform}_chr${chr}_removed_variants.txt
+    
+    removed_variants=\$(wc -l < ${platform}_chr${chr}_removed_variants.txt)
+    retained_variants=\$((total_variants - removed_variants))
+    
+    # Create stats file
+    cat > ${platform}_chr${chr}_variant_qc_stats.txt <<EOF
+Metric\tValue
+Chromosome\t${chr}
+Total variants\t\${total_variants}
+Variants removed (<95% call rate)\t\${removed_variants}
+Variants retained\t\${retained_variants}
+Percentage retained\t\$(awk "BEGIN {printf \\"%.2f\\", 100*\${retained_variants}/\${total_variants}}")%
+EOF
+    
+    echo "Variant QC Statistics for chr${chr}:"
+    cat ${platform}_chr${chr}_variant_qc_stats.txt
+    
+    # Filter VCF
+    if [ -s ${platform}_chr${chr}_removed_variants.txt ]; then
+        echo "Removing \${removed_variants} variants from chr${chr}..."
+        bcftools view -e 'ID=@${platform}_chr${chr}_removed_variants.txt' \\
+            ${vcf} -Oz -o ${platform}_chr${chr}_qc.vcf.gz
+    else
+        echo "No variants to remove for chr${chr}"
+        cp ${vcf} ${platform}_chr${chr}_qc.vcf.gz
+    fi
+    
+    # Index filtered VCF
+    bcftools index -t ${platform}_chr${chr}_qc.vcf.gz
+    
+    echo "\\n=== Variant Filtering Complete for chr${chr} ==="
+    echo "Removed \${removed_variants} variants with <95% call rate"
+    echo "Retained \${retained_variants} variants"
+    """
+}
+
+// ============================================================================
+// PROCESS 5: Generate comprehensive QC summary report
+// ============================================================================
+process generateQCSummary {
+    label 'R'
+    tag "${platform}"
+    publishDir "${params.outdir}/module3/05_qc_reports/${platform}", mode: 'copy'
+    
+    input:
+    tuple val(platform), path(rsq_stats), path(sample_stats), path(variant_stats)
     
     output:
     tuple val(platform), 
-          path("${platform}_imputed_chr*.dose.vcf.gz"),
-          path("${platform}_imputed_chr*.info.gz"),
-          emit: topmed_results
+          path("${platform}_module3_qc_report.html"),
+          path("${platform}_module3_qc_summary.txt"),
+          emit: qc_report
     
     script:
     """
-    #!/usr/bin/env python3
-    import requests
-    import json
-    import os
-    import subprocess
+    #!/usr/bin/env Rscript
     
-    # Set up API authentication
-    token = "${params.topmed_api_token}"
-    headers = {'X-Auth-Token': token}
-    base_url = 'https://imputation.biodatacatalyst.nhlbi.nih.gov/api/v2'
+    library(data.table)
+    library(ggplot2)
+    library(knitr)
     
-    # Load job information
-    with open('${job_info}') as f:
-        job = json.load(f)
+    cat("\\n=== Generating QC Summary Report for ${platform} ===\\n")
     
-    job_id = job['id']
+    # ========== Read all statistics files ==========
     
-    # Get download links for all result files
-    response = requests.get(f'{base_url}/jobs/{job_id}/results', headers=headers)
-    files = response.json()
+    # 1. MagicalRsq filtering statistics
+    rsq_files <- list.files(pattern="_rsq_stats.txt", full.names=TRUE)
+    rsq_data <- rbindlist(lapply(rsq_files, fread))
     
-    # Download all chromosome files
-    for file_info in files:
-        filename = file_info['name']
-        download_url = file_info['url']
-        
-        print(f"Downloading: {filename}")
-        
-        # Download file
-        file_response = requests.get(download_url, stream=True)
-        file_response.raise_for_status()
-        
-        with open(filename, 'wb') as f:
-            for chunk in file_response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        print(f"✓ Downloaded: {filename}")
+    total_variants_input <- sum(rsq_data\$total_variants)
+    total_variants_pass_rsq <- sum(rsq_data\$pass_variants)
+    total_variants_filtered_rsq <- sum(rsq_data\$filtered_variants)
+    pct_pass_rsq <- 100 * total_variants_pass_rsq / total_variants_input
     
-    # Decrypt and extract files
-    # TOPMed provides password in job completion email or API response
-    password = "${params.topmed_password}"
-    if not password or password == "null":
-        # Try to get password from job status
-        status_response = requests.get(f'{base_url}/jobs/{job_id}', headers=headers)
-        status = status_response.json()
-        password = status.get('outputParams', {}).get('password', '')
+    # 2. Sample filtering statistics
+    sample_stats <- fread("${sample_stats}", header=TRUE)
     
-    # Extract encrypted archives using 7zip
-    subprocess.run(['7z', 'x', f'-p{password}', '*.zip'], check=True)
+    # 3. Variant filtering statistics
+    variant_files <- list.files(pattern="_variant_qc_stats.txt", full.names=TRUE)
+    variant_data <- rbindlist(lapply(variant_files, fread))
     
-    # Rename files to standardized format for downstream processing
-    for filename in os.listdir('.'):
-        if 'chr' in filename:
-            # Extract chromosome number
-            if '.dose.vcf.gz' in filename:
-                chr_num = filename.split('chr')[1].split('.')[0]
-                new_name = f"${platform}_imputed_chr{chr_num}.dose.vcf.gz"
-                os.rename(filename, new_name)
-                print(f"Renamed: {filename} -> {new_name}")
-            elif '.info.gz' in filename:
-                chr_num = filename.split('chr')[1].split('.')[0]
-                new_name = f"${platform}_imputed_chr{chr_num}.info.gz"
-                os.rename(filename, new_name)
-                print(f"Renamed: {filename} -> {new_name}")
+    total_variants_after_sample_filter <- sum(variant_data[, as.numeric(gsub(",", "", get("Total variants")))])
+    total_variants_removed_call_rate <- sum(variant_data[, as.numeric(gsub(",", "", get("Variants removed (<95% call rate)")))])
+    final_variant_count <- sum(variant_data[, as.numeric(gsub(",", "", get("Variants retained")))])
     
-    print("✓ All files downloaded and extracted successfully!")
+    # ========== Create comprehensive summary ==========
+    
+    summary <- data.frame(
+        Step = c(
+            "1. Initial imputed variants",
+            "2. After MagicalRsq filtering (R² ≥ 0.3)",
+            "3. After sample QC (call rate ≥ 95%)",
+            "4. After variant QC (call rate ≥ 95%)",
+            "5. Final QC'd variant count"
+        ),
+        Variants = c(
+            format(total_variants_input, big.mark=","),
+            format(total_variants_pass_rsq, big.mark=","),
+            "—",
+            "—",
+            format(final_variant_count, big.mark=",")
+        ),
+        Removed = c(
+            "—",
+            format(total_variants_filtered_rsq, big.mark=","),
+            "—",
+            format(total_variants_removed_call_rate, big.mark=","),
+            "—"
+        ),
+        Percentage = c(
+            "100%",
+            sprintf("%.2f%%", pct_pass_rsq),
+            "—",
+            sprintf("%.2f%%", 100 * final_variant_count / total_variants_pass_rsq),
+            sprintf("%.2f%%", 100 * final_variant_count / total_variants_input)
+        )
+    )
+    
+    # Add sample statistics
+    sample_summary <- data.frame(
+        Metric = c(
+            "Total samples",
+            "Samples removed (<95% call rate)",
+            "Samples retained",
+            "Sample retention rate"
+        ),
+        Value = c(
+            sample_stats[Metric == "Total samples", Value],
+            sample_stats[Metric == "Samples removed (<95% call rate)", Value],
+            sample_stats[Metric == "Samples retained", Value],
+            sample_stats[Metric == "Percentage retained", Value]
+        )
+    )
+    
+    # ========== Write summary text file ==========
+    
+    sink("${platform}_module3_qc_summary.txt")
+    cat("================================================================================\\n")
+    cat("MODULE 3 POST-IMPUTATION QC SUMMARY\\n")
+    cat("Platform: ${platform}\\n")
+    cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\\n")
+    cat("================================================================================\\n\\n")
+    
+    cat("VARIANT FILTERING SUMMARY:\\n")
+    cat("--------------------------------------------------------------------------------\\n")
+    print(kable(summary, align='lrrr'))
+    cat("\\n")
+    
+    cat("SAMPLE FILTERING SUMMARY:\\n")
+    cat("--------------------------------------------------------------------------------\\n")
+    print(kable(sample_summary, align='lr'))
+    cat("\\n")
+    
+    cat("KEY METRICS:\\n")
+    cat("  • Overall variant retention:", sprintf("%.2f%%", 100 * final_variant_count / total_variants_input), "\\n")
+    cat("  • MagicalRsq effectiveness:", 
+        sprintf("%.1fM variants filtered", total_variants_filtered_rsq/1e6), "\\n")
+    cat("  • Sample retention:", sample_stats[Metric == "Percentage retained", Value], "\\n")
+    cat("  • Final dataset:", format(final_variant_count, big.mark=","), 
+        "variants across", sample_stats[Metric == "Samples retained", Value], "samples\\n")
+    cat("\\n================================================================================\\n")
+    sink()
+    
+    # ========== Generate HTML report ==========
+    
+    cat("\\nGenerating HTML report...\\n")
+    
+    # Create R Markdown content
+    rmd_content <- sprintf('
+---
+title: "Module 3 Post-Imputation QC Report"
+subtitle: "Platform: %s"
+date: "`r format(Sys.time(), \\"%%Y-%%m-%%d %%H:%%M:%%S\\")`"
+output: 
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Executive Summary
+
+This report summarizes the quality control performed on imputed genotype data for **%s**.
+
+## QC Pipeline Overview
+
+The Module 3 QC pipeline consists of four sequential filtering steps:
+
+1. **MagicalRsq Filtering**: Removes poorly imputed variants (empirical R² < 0.3)
+2. **Sample QC**: Removes samples with low genotype call rates (<95%%)
+3. **Variant QC**: Removes variants with low sample call rates (<95%%)
+4. **Final QC Dataset**: High-quality, analysis-ready genotype data
+
+---
+
+# Variant Filtering Results
+
+```{r variant_summary, echo=FALSE}
+summary_table <- read.table("${platform}_module3_qc_summary.txt", 
+                             skip=7, nrows=5, header=FALSE, sep="\\t",
+                             col.names=c("Step", "Variants", "Removed", "Percentage"))
+knitr::kable(summary_table, format="html", align="lrrr",
+             caption="Variant Filtering Pipeline Summary")
+```
+
+## Key Findings
+
+- **Initial variants**: %s
+- **Final variants**: %s (%.2f%%%% retention)
+- **MagicalRsq filtered**: %s variants
+- **Call rate filtered**: %s variants
+
+---
+
+# Sample Filtering Results
+
+```{r sample_summary, echo=FALSE}
+sample_table <- read.table("${platform}_module3_qc_summary.txt",
+                           skip=16, nrows=4, header=FALSE, sep="\\t",
+                           col.names=c("Metric", "Value"))
+knitr::kable(sample_table, format="html", align="lr",
+             caption="Sample Quality Control Summary")
+```
+
+---
+
+# Per-Chromosome Statistics
+
+```{r per_chr_stats, echo=FALSE}
+rsq_data <- read.table(textConnection("%s"), header=TRUE, sep="\\t")
+knitr::kable(rsq_data[, c("chromosome", "total_variants", "pass_variants", 
+                          "filtered_variants", "pct_pass")],
+             format="html", digits=2,
+             col.names=c("Chr", "Total", "Passed", "Filtered", "%%% Passed"),
+             caption="MagicalRsq Filtering by Chromosome")
+```
+
+---
+
+# Recommendations
+
+## ✓ Quality Indicators
+- Sample retention rate: **%s**
+- Variant retention rate: **%.2f%%**
+- Mean MagicalRsq for passing variants: High quality expected
+
+## → Next Steps
+1. **Module 4**: Merge platforms (if multiple)
+2. **Module 5**: Re-imputation of merged data
+3. **Module 6**: Final QC and relatedness filtering
+4. **Module 7**: Ancestry estimation
+
+---
+
+# Technical Details
+
+## MagicalRsq-X Features
+- LD scores from TOP-LD (4 populations)
+  - Long-range: ±1 Mb window
+  - Short-range: ±100 kb window
+- Recombination rates (1000 Genomes)
+- Ancestry-specific MAF
+- S/HIC features (selection/haplotype)
+
+**Note**: MagicalRsq-X automatically incorporates ancestry-aware LD patterns without requiring ancestry input.
+
+## Filtering Thresholds
+- **MagicalRsq**: ≥ 0.3 (empirical R²)
+- **Sample call rate**: ≥ 95%%
+- **Variant call rate**: ≥ 95%%
+
+---
+
+*Report generated: `r Sys.time()`*
+', 
+    "${platform}", "${platform}",
+    format(total_variants_input, big.mark=","),
+    format(final_variant_count, big.mark=","),
+    100 * final_variant_count / total_variants_input,
+    format(total_variants_filtered_rsq, big.mark=","),
+    format(total_variants_removed_call_rate, big.mark=","),
+    paste(capture.output(write.table(rsq_data, sep="\\t", quote=FALSE, row.names=FALSE)), collapse="\\n"),
+    sample_stats[Metric == "Percentage retained", Value],
+    100 * final_variant_count / total_variants_input
+    )
+    
+    writeLines(rmd_content, "${platform}_report.Rmd")
+    
+    # Render to HTML
+    rmarkdown::render("${platform}_report.Rmd", 
+                      output_file="${platform}_module3_qc_report.html",
+                      quiet=TRUE)
+    
+    cat("\\n=== QC Report Generation Complete ===\\n")
+    cat("Summary text file:", "${platform}_module3_qc_summary.txt", "\\n")
+    cat("HTML report:", "${platform}_module3_qc_report.html", "\\n")
     """
 }
 
 // ============================================================================
-// PROCESS 4: Submit to All of Us AnVIL Imputation
+// MODULE 3 WORKFLOW
 // ============================================================================
-// What this does: Submits VCF files to All of Us AnVIL imputation service
-// - Uses Terra/Cromwell workflow system
-// - Uploads to specified workspace in Google Cloud
-// - Configures job using AnVIL-specific manifest
-
-process submitAnvilImputation {
-    label 'api'
-    tag "${platform}"
-    publishDir "${params.outdir}/module2/03_anvil_jobs/${platform}", mode: 'copy'
-    
-    when:
-    params.run_anvil
-    
-    input:
-    tuple val(platform), path(vcf_files), path(tbi_files)
-    tuple val(platform2), path(manifest), path(anvil_manifest), path(file_list)
-    
-    output:
-    tuple val(platform),
-          path("${platform}_anvil_job.json"),
-          emit: job_info
-    
-    script:
-    """
-    #!/usr/bin/env python3
-    import json
-    import subprocess
-    import os
-    
-    # Configure workspace information
-    workspace = "${params.anvil_workspace}"
-    project = "${params.anvil_project}"
-    
-    if not workspace or workspace == "null":
-        raise ValueError("AnVIL workspace required. Set params.anvil_workspace")
-    if not project or project == "null":
-        raise ValueError("AnVIL project required. Set params.anvil_project")
-    
-    # Prepare job information
-    job_info = {
-        'platform': '${platform}',
-        'workspace': workspace,
-        'project': project,
-        'vcf_files': '${vcf_files}'.split(),
-        'manifest': '${anvil_manifest}',
-        'status': 'submitted',
-        'submission_time': subprocess.check_output(['date', '-Iseconds']).decode().strip()
-    }
-    
-    # Submit workflow using Terra CLI
-    # Note: Requires terra CLI to be installed and authenticated
-    # See: https://terra.bio/using-terra-cli/
-    
-    cmd = [
-        'terra', 'workflow', 'submit',
-        '--workspace', workspace,
-        '--project', project,
-        '--input', '${anvil_manifest}',
-        '--workflow-name', 'allofus-imputation'
-    ]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        job_info['submission_output'] = result.stdout
-        job_info['workflow_id'] = result.stdout.split('Workflow ID: ')[1].split()[0] if 'Workflow ID:' in result.stdout else None
-        print(f"✓ AnVIL workflow submitted successfully!")
-        print(result.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Workflow submission command failed: {e.stderr}")
-        print("This may be expected if using All of Us Researcher Workbench web interface")
-        job_info['submission_method'] = 'manual'
-    
-    # Save job information
-    with open('${platform}_anvil_job.json', 'w') as f:
-        json.dump(job_info, f, indent=2)
-    
-    print(f"Job information saved for platform: ${platform}")
-    """
-}
-
-// ============================================================================
-// PROCESS 5: Monitor AnVIL job
-// ============================================================================
-// What this does: Checks AnVIL/Terra workflow status
-// - Queries Terra/Cromwell API every 15 minutes
-// - Monitors workflow execution state
-// - Retries until completion or failure
-
-process monitorAnvilJob {
-    label 'api'
-    tag "${platform}"
-    maxRetries 200  // 200 × 15 min = 50 hours maximum monitoring
-    errorStrategy 'retry'
-    
-    when:
-    params.run_anvil
-    
-    input:
-    tuple val(platform), path(job_info)
-    
-    output:
-    tuple val(platform), path(job_info), emit: completed_job
-    
-    script:
-    """
-    #!/usr/bin/env python3
-    import json
-    import time
-    import sys
-    import subprocess
-    
-    # Load job information
-    with open('${job_info}') as f:
-        job = json.load(f)
-    
-    workflow_id = job.get('workflow_id')
-    workspace = job.get('workspace')
-    project = job.get('project')
-    
-    if not workflow_id:
-        print("No workflow ID found - assuming manual submission")
-        print("Check status manually in All of Us Researcher Workbench")
-        # For manual submissions, exit successfully after delay
-        time.sleep(${params.monitor_interval})
-        sys.exit(0)
-    
-    # Check workflow status using Terra CLI
-    cmd = [
-        'terra', 'workflow', 'status',
-        '--workspace', workspace,
-        '--project', project,
-        '--workflow-id', workflow_id
-    ]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        status = result.stdout
-        
-        print(f"Workflow status for ${platform}:")
-        print(status)
-        
-        # Check for completion keywords
-        if 'Succeeded' in status or 'Done' in status:
-            print("✓ Workflow completed successfully!")
-            sys.exit(0)
-        elif 'Failed' in status or 'Aborted' in status:
-            print("✗ Workflow failed")
-            sys.exit(1)
-        else:
-            print(f"Workflow still running... will check again in ${params.monitor_interval / 60} minutes")
-            time.sleep(${params.monitor_interval})
-            sys.exit(100)  # Trigger retry
-            
-    except subprocess.CalledProcessError as e:
-        print(f"Error checking workflow status: {e.stderr}")
-        print("Assuming job is still running...")
-        time.sleep(${params.monitor_interval})
-        sys.exit(100)
-    """
-}
-
-// ============================================================================
-// PROCESS 6: Download AnVIL results
-// ============================================================================
-// What this does: Downloads imputed data from All of Us AnVIL workspace
-// - Uses gsutil or Terra CLI to download from Google Cloud Storage
-// - Retrieves all chromosome VCF and info files
-// - Renames to standardized format
-
-process downloadAnvilResults {
-    label 'download'
-    tag "${platform}"
-    publishDir "${params.outdir}/module2/04_anvil_results/${platform}", mode: 'copy'
-    
-    when:
-    params.run_anvil
-    
-    input:
-    tuple val(platform), path(job_info)
-    
-    output:
-    tuple val(platform),
-          path("${platform}_imputed_chr*.dose.vcf.gz"),
-          path("${platform}_imputed_chr*.info.gz"),
-          emit: anvil_results
-    
-    script:
-    """
-    #!/usr/bin/env python3
-    import json
-    import subprocess
-    import os
-    import glob
-    
-    # Load job information
-    with open('${job_info}') as f:
-        job = json.load(f)
-    
-    workspace = job.get('workspace')
-    project = job.get('project')
-    workflow_id = job.get('workflow_id')
-    
-    print(f"Downloading results for ${platform} from AnVIL workspace...")
-    
-    # Method 1: Using Terra CLI (preferred)
-    try:
-        # Get workflow outputs
-        cmd = [
-            'terra', 'workflow', 'outputs',
-            '--workspace', workspace,
-            '--project', project,
-            '--workflow-id', workflow_id
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            print("Workflow outputs:")
-            print(result.stdout)
-    except Exception as e:
-        print(f"Note: Could not retrieve outputs via Terra CLI: {e}")
-    
-    # Method 2: Direct download from Google Cloud Storage
-    # Construct typical output path for All of Us imputation
-    bucket_path = f"gs://{workspace}-workspace-bucket/submissions/{workflow_id}/"
-    
-    try:
-        # Download all VCF and info files
-        cmd = ['gsutil', '-m', 'cp', '-r', f'{bucket_path}*.vcf.gz', '.']
-        subprocess.run(cmd, check=False)
-        
-        cmd = ['gsutil', '-m', 'cp', '-r', f'{bucket_path}*.info.gz', '.']
-        subprocess.run(cmd, check=False)
-        
-        print("✓ Files downloaded from Google Cloud Storage")
-    except Exception as e:
-        print(f"Note: Direct GCS download failed: {e}")
-        print("Files may need to be downloaded manually from workspace")
-    
-    # Rename files to standardized format
-    for filename in os.listdir('.'):
-        if 'chr' in filename:
-            if '.dose.vcf.gz' in filename or '.vcf.gz' in filename:
-                chr_num = filename.split('chr')[1].split('.')[0]
-                new_name = f"${platform}_imputed_chr{chr_num}.dose.vcf.gz"
-                os.rename(filename, new_name)
-                print(f"Renamed: {filename} -> {new_name}")
-            elif '.info' in filename:
-                chr_num = filename.split('chr')[1].split('.')[0]
-                new_name = f"${platform}_imputed_chr{chr_num}.info.gz"
-                os.rename(filename, new_name)
-                print(f"Renamed: {filename} -> {new_name}")
-    
-    print("✓ Download complete!")
-    """
-}
-
-// ============================================================================
-// MODULE 2 WORKFLOW - Main orchestration
-// ============================================================================
-workflow MODULE2_IMPUTATION {
+workflow MODULE3_POSTQC {
     take:
-    vcf_files    // From Module 1: tuple(platform, vcf_files, tbi_files)
-    manifests    // From Module 1: tuple(platform, topmed_json, anvil_tsv, file_list)
+    imputed_data  // From Module 2: tuple(platform, vcf_files, info_files)
     
     main:
-    // Initialize empty channels for conditional outputs
-    topmed_out = Channel.empty()
-    anvil_out = Channel.empty()
     
-    // TOPMed Imputation Pathway
-    if (params.run_topmed) {
-        // Submit jobs to TOPMed server
-        submitTOPMedImputation(vcf_files, manifests)
-        
-        // Monitor until completion (checks every 15 minutes)
-        monitorTOPMedJob(submitTOPMedImputation.out.job_info)
-        
-        // Download results when ready
-        downloadTOPMedResults(monitorTOPMedJob.out.completed_job)
-        
-        topmed_out = downloadTOPMedResults.out.topmed_results
-    }
+    // ========== STEP 0: Index VCF files ==========
+    // Flatten to per-chromosome channels for parallelization
+    imputed_data
+        .flatMap { platform, vcfs, infos ->
+            def vcf_list = vcfs instanceof List ? vcfs : [vcfs].flatten()
+            def info_list = infos instanceof List ? infos : [infos].flatten()
+            
+            vcf_list.collect { vcf ->
+                def chr = (vcf.name =~ /chr(\d+|X|Y)/)[0][1]
+                def info = info_list.find { it.name.contains("chr\${chr}") }
+                tuple(platform, chr, vcf, info)
+            }
+        }
+        .set { per_chr_data }
     
-    // All of Us AnVIL Imputation Pathway
-    if (params.run_anvil) {
-        // Submit workflows to AnVIL/Terra
-        submitAnvilImputation(vcf_files, manifests)
-        
-        // Monitor until completion (checks every 15 minutes)
-        monitorAnvilJob(submitAnvilImputation.out.job_info)
-        
-        // Download results when ready
-        downloadAnvilResults(monitorAnvilJob.out.completed_job)
-        
-        anvil_out = downloadAnvilResults.out.anvil_results
-    }
+    // Create index files (.tbi) for all VCFs
+    indexImputedVCFs(per_chr_data)
     
-    // Determine final output based on which services ran
-    if (params.run_topmed && params.run_anvil) {
-        // If both services ran, user will have both outputs available
-        // Downstream modules can choose which to use or compare them
-        final_results = topmed_out.mix(anvil_out)
-    } else if (params.run_topmed) {
-        final_results = topmed_out
-    } else {
-        final_results = anvil_out
-    }
+    // ========== STEP 1: MagicalRsq filtering ==========
+    magicalRsqFilter(indexImputedVCFs.out.indexed_vcfs)
+    
+    // ========== STEP 2: Calculate call rates ==========
+    calculateCallRates(magicalRsqFilter.out.filtered_vcf)
+    
+    // ========== STEP 3: Filter low call rate samples ==========
+    // Group by platform for genome-wide sample filtering
+    calculateCallRates.out.with_call_rates
+        .map { platform, chr, vcf, tbi, sample_cr, variant_cr ->
+            tuple(platform, vcf, tbi, sample_cr)
+        }
+        .groupTuple()
+        .set { grouped_for_sample_filter }
+    
+    filterLowCallRateSamples(grouped_for_sample_filter)
+    
+    // ========== STEP 4: Filter low call rate variants ==========
+    // Per-chromosome variant filtering
+    calculateCallRates.out.with_call_rates
+        .map { platform, chr, vcf, tbi, sample_cr, variant_cr ->
+            tuple(platform, chr, vcf, tbi, variant_cr)
+        }
+        .set { for_variant_filter }
+    
+    filterLowCallRateVariants(for_variant_filter)
+    
+    // ========== STEP 5: Generate QC summary report ==========
+    // Collect all QC statistics for report generation
+    magicalRsqFilter.out.filtered_vcf
+        .map { platform, chr, vcf, tbi, stats -> tuple(platform, stats) }
+        .groupTuple()
+        .join(
+            filterLowCallRateSamples.out.sample_filtered
+                .map { platform, vcfs, tbis, removed, stats -> tuple(platform, stats) }
+        )
+        .join(
+            filterLowCallRateVariants.out.variant_filtered
+                .map { platform, chr, vcf, tbi, removed, stats -> tuple(platform, stats) }
+                .groupTuple()
+        )
+        .set { for_report }
+    
+    generateQCSummary(for_report)
+    
+    // ========== Prepare output channels ==========
+    // Group final QC'd data by platform for Module 4
+    filterLowCallRateVariants.out.variant_filtered
+        .map { platform, chr, vcf, tbi, removed, stats ->
+            tuple(platform, vcf, tbi)
+        }
+        .groupTuple()
+        .set { qc_complete_data }
     
     emit:
-    imputed_data = final_results
-    topmed_results = topmed_out
-    anvil_results = anvil_out
+    qc_data = qc_complete_data  // For Module 4: tuple(platform, vcfs[], tbis[])
+    qc_reports = generateQCSummary.out.qc_report  // QC reports
 }
-
