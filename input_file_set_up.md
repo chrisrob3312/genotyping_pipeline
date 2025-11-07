@@ -1,289 +1,481 @@
-# Sample Sheet Guide
+# Input File Setup Guide v2.0
 
 ## Overview
-The sample sheet is a CSV file that tells the pipeline where to find your genotyping data and how to process it. Each row represents one "batch" of samples from a particular genotyping platform.
+
+This pipeline is **flexible** and handles multiple real-world data structures:
+- Individual samples (all chromosomes together OR split by chromosome)
+- Pre-merged batch files
+- Mixed file formats (PLINK, VCF)
+- Different naming conventions
+- Different genome builds per batch
 
 ---
 
-## Column Descriptions
+## Sample Sheet Format (CSV)
 
-### 1. `platform_id` (REQUIRED)
-**What it is:** A unique identifier for this batch of samples
+### Basic Columns (Always Required)
 
-**Rules:**
-- Must be unique for each row
-- No spaces (use underscores instead)
-- Should be descriptive
-- Alphanumeric characters only
-
-**Examples:**
-- `Platform1_Affy6`
-- `GSAv1_batch1`
-- `Illumina650K_cohort1`
-
-**Purpose:** This ID will be used to name output files, so make it meaningful!
-
----
-
-### 2. `file_path` (REQUIRED)
-**What it is:** Path to your genotype files (WITHOUT file extension)
-
-**For PLINK files:**
-```
-If you have:
-  /data/genotypes/platform1.bed
-  /data/genotypes/platform1.bim
-  /data/genotypes/platform1.fam
-
-Use: /data/genotypes/platform1
-```
-
-**For VCF files (chromosome-split):**
-```
-If you have:
-  /data/vcfs/platform2_chr1.vcf.gz
-  /data/vcfs/platform2_chr2.vcf.gz
-  ...
-  /data/vcfs/platform2_chr22.vcf.gz
-
-Use: /data/vcfs/platform2_chr
-
-The pipeline will automatically find chr1-22
-```
-
-**For single VCF (all chromosomes):**
-```
-If you have:
-  /data/vcfs/platform3_all.vcf.gz
-
-Use: /data/vcfs/platform3_all
-```
-
-**Path Types:**
-- Absolute paths (recommended): `/full/path/to/file`
-- Relative paths (from where you run pipeline): `data/file`
-
----
-
-### 3. `file_type` (REQUIRED)
-**What it is:** Format of your genotype files
-
-**Options:**
-- `plink` - PLINK binary format (.bed/.bim/.fam)
-- `vcf` - VCF format (.vcf or .vcf.gz)
-- `vcf_split` - VCF files split by chromosome
-
-**How the pipeline handles each:**
-- **plink**: Reads .bed/.bim/.fam directly
-- **vcf**: Converts to PLINK if needed, splits by chromosome
-- **vcf_split**: Processes each chromosome separately
-
----
-
-### 4. `build` (REQUIRED)
-**What it is:** Genome build/assembly version
-
-**Options:**
-- `hg19` (also known as GRCh37)
-- `hg38` (also known as GRCh38)
-
-**Why it matters:**
-- TOPMed imputation server uses hg38
-- The pipeline will perform liftOver if needed
-- Build mismatches can cause major issues!
-
-**How to check your build:**
-```bash
-# Look at chromosome positions in .bim file
-head -n 5 yourfile.bim
-
-# hg19 example (chr1 SNP positions):
-# rs12345  1  0  752566  A  G
-
-# hg38 example (chr1 SNP positions, slightly different):
-# rs12345  1  0  817186  A  G
-
-# Or check your array manufacturer documentation
-```
-
----
-
-### 5. `collection_batch` (OPTIONAL)
-**What it is:** Groups samples collected at the same time
-
-**Purpose:**
-- Helps track batch effects
-- Useful for QC reporting
-- Can be used for meta-data
-
-**Examples:**
-- Date-based: `2020_01`, `2021_Q1`
-- Sequential: `batch1`, `batch2`, `batch3`
-- Study-based: `pilot`, `main_cohort`
-- Lab-based: `lab_A`, `lab_B`
-
----
-
-## Complete Examples
-
-### Example 1: Simple Setup (2 platforms, all samples together)
 ```csv
-platform_id,file_path,file_type,build,collection_batch
-Affy6_cohort1,/data/geno/affy6_all,plink,hg19,cohort1
-Illumina_cohort2,/data/geno/illumina_all,plink,hg38,cohort2
+platform_id,batch_id,input_path,file_type,build,file_structure
 ```
 
-### Example 2: Multiple Batches of Same Platform
+### Column Definitions
+
+| Column | Description | Required | Values |
+|--------|-------------|----------|--------|
+| `platform_id` | Genotyping platform/array | Yes | GSAv1, GSAv2, Omni25, MEGA |
+| `batch_id` | Batch identifier | Yes | batch_2020_01, cohort_A, phase1 |
+| `input_path` | Path to directory OR file prefix | Yes | /data/samples/ OR /data/merged_batch |
+| `file_type` | File format | Yes | plink, vcf |
+| `build` | Genome build for this batch | Yes | hg19, hg38 |
+| `file_structure` | How files are organized | Yes | See below |
+
+### File Structure Options
+
+| `file_structure` | Description | Example Files |
+|------------------|-------------|---------------|
+| `individual_samples` | One file set per sample, all chr together | sample_001.bed, sample_002.bed |
+| `individual_chr_split` | One file per sample per chromosome | sample_001_chr1.bed, sample_001_chr2.bed |
+| `merged_batch` | Already merged batch file | batch1_all_samples.bed |
+| `merged_chr_split` | Merged batch, split by chromosome | batch1_chr1.bed, batch1_chr2.bed |
+
+---
+
+## Scenario 1: Individual Samples (All Chromosomes Together)
+
+**Most common format** - Each sample is separate, contains all chromosomes.
+
+### Directory Structure:
+```
+/data/gsa_v1/batch_2020_01/
+├── sample_001.bed/bim/fam
+├── sample_002.bed/bim/fam
+├── sample_003.bed/bim/fam
+└── ... (850 samples)
+```
+
+### Sample Sheet Entry:
 ```csv
-platform_id,file_path,file_type,build,collection_batch
-GSAv1_jan2020,/data/GSA/2020_01/samples,plink,hg19,2020_01
-GSAv1_jun2020,/data/GSA/2020_06/samples,plink,hg19,2020_06
-GSAv1_jan2021,/data/GSA/2021_01/samples,plink,hg19,2021_01
-GSAv2_jun2021,/data/GSA/2021_06/samples,plink,hg38,2021_06
-GSAv2_dec2021,/data/GSA/2021_12/samples,plink,hg38,2021_12
+platform_id,batch_id,input_path,file_type,build,file_structure
+GSAv1,batch_2020_01,/data/gsa_v1/batch_2020_01,plink,hg19,individual_samples
 ```
 
-### Example 3: Mixed File Types and Builds
+### What Pipeline Does:
+```
+1. Finds all *.bed files in directory
+2. Processes each sample in parallel (850 parallel jobs)
+3. Merges samples into batch
+4. Continues with QC, liftover, etc.
+```
+
+---
+
+## Scenario 2: Individual Samples Split by Chromosome
+
+**Common after pre-processing** - Each sample has separate files per chromosome.
+
+### Directory Structure:
+```
+/data/gsa_v2/batch_2021_03/
+├── sample_001_chr1.bed/bim/fam
+├── sample_001_chr2.bed/bim/fam
+├── ...
+├── sample_001_chr22.bed/bim/fam
+├── sample_002_chr1.bed/bim/fam
+├── sample_002_chr2.bed/bim/fam
+└── ... (920 samples × 22 chromosomes = 20,240 files)
+```
+
+### Sample Sheet Entry:
 ```csv
-platform_id,file_path,file_type,build,collection_batch
-Platform1,/project/arrays/platform1,plink,hg19,batch1
-Platform2,/project/arrays/platform2,plink,hg38,batch1
-Platform3_VCF,/project/vcfs/platform3_all,vcf,hg38,batch2
-Platform4_splitVCF,/project/vcfs/platform4_chr,vcf_split,hg19,batch2
+platform_id,batch_id,input_path,file_type,build,file_structure
+GSAv2,batch_2021_03,/data/gsa_v2/batch_2021_03,plink,hg38,individual_chr_split
+```
+
+### What Pipeline Does:
+```
+1. Finds all files matching pattern: *_chr*.bed
+2. Groups by sample ID (extracts from filename)
+3. For each sample: Concatenates chr1-22 into single file
+4. Processes concatenated samples in parallel
+5. Merges samples into batch
 ```
 
 ---
 
-## How the Pipeline Uses This Information
+## Scenario 3: Pre-Merged Batch File
 
-### Step 1: Input Reading
-The pipeline reads this CSV and creates a "channel" (Nextflow concept) with one element per row.
+**Time-saver if you've already merged** - One file contains all samples.
 
-### Step 2: Parallel Processing
-Each row is processed **in parallel** through Modules 1-3:
+### File Structure:
 ```
-Row 1 (Platform1) → Module 1 → Module 2 → Module 3
-Row 2 (Platform2) → Module 1 → Module 2 → Module 3  } Parallel!
-Row 3 (GSAv1_b1)  → Module 1 → Module 2 → Module 3
+/data/omni25/
+├── cohort_A_merged.bed
+├── cohort_A_merged.bim
+└── cohort_A_merged.fam
 ```
 
-### Step 3: Grouping for Merge
-In Module 4, all platforms are merged together.
-
-### Step 4: Naming Convention
-Output files are named using `platform_id`:
+### Sample Sheet Entry:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+Omni25,cohort_A,/data/omni25/cohort_A_merged,plink,hg19,merged_batch
 ```
-Platform1_qc.bed
-Platform1_topmed_chr1.vcf.gz
-Platform1_allofus_filtered.bed
+
+### What Pipeline Does:
+```
+1. Detects merged batch (no sample-level processing needed)
+2. Skips sample discovery and merging steps
+3. Goes directly to QC → liftover → strand check
 ```
 
 ---
 
-## Common Questions
+## Scenario 4: Pre-Merged Batch, Split by Chromosome
 
-### Q: Can I have the same samples across multiple rows?
-**A:** No! Each sample should appear in only ONE row. If you have:
-- Same samples on different platforms → keep them separate, merge happens in Module 4
-- Duplicate samples (for QC) → handle separately before the pipeline
+**After imputation prep elsewhere** - Merged batch already split by chromosome.
 
-### Q: What if I have samples split across multiple PLINK files?
-**A:** First merge them with PLINK, then add to sample sheet:
-```bash
-# Merge multiple PLINK files
-plink --bfile file1 --merge-list merge_list.txt --make-bed --out combined
-
-# Then use 'combined' in your sample sheet
+### File Structure:
+```
+/data/mega/phase2/
+├── phase2_all_samples_chr1.bed/bim/fam
+├── phase2_all_samples_chr2.bed/bim/fam
+├── ...
+└── phase2_all_samples_chr22.bed/bim/fam
 ```
 
-### Q: Can I process just some platforms?
-**A:** Yes! Just remove rows from the sample sheet or create a new CSV with only the platforms you want.
-
-### Q: Do I need collection_batch?
-**A:** No, it's optional. But it's helpful for:
-- Tracking where samples came from
-- Understanding batch effects
-- Organizing your results
-
-### Q: What if my VCF files are split differently (e.g., regions not chromosomes)?
-**A:** You'll need to restructure them first:
-```bash
-# Example: split by chromosome
-for chr in {1..22}; do
-  bcftools view -r ${chr} input.vcf.gz -Oz -o output_chr${chr}.vcf.gz
-done
+### Sample Sheet Entry:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+MEGA,phase2,/data/mega/phase2/phase2_all_samples,plink,hg38,merged_chr_split
 ```
 
-### Q: Can I mix hg19 and hg38 in the same analysis?
-**A:** Yes! The pipeline handles this automatically with liftOver, but it's possible some SNPs may be lost or undergo position changes during liftOver via the imputation servers. Performing liftOver before imputation may help accuracy but isn't essential as both All of Us and TOPMed Servers incoporate liftOver as part of their process.
+### What Pipeline Does:
+```
+1. Recognizes pre-split chromosomes
+2. Processes each chromosome independently
+3. Skips sample-level steps, goes to QC
+```
 
 ---
 
-## Validation
+## Scenario 5: Mixed Structures in One Study
 
-### Before Running Pipeline
-Check your sample sheet for:
+**Real-world complexity** - Different batches organized differently.
 
-1. **No duplicate platform_ids**
-```bash
-# Should return "OK" if no duplicates
-cut -d',' -f1 sample_sheet.csv | sort | uniq -d | wc -l
-# Output: 0 (means no duplicates)
+### Sample Sheet:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+GSAv1,early_batch,/data/gsa/early,plink,hg19,individual_samples
+GSAv1,mid_batch,/data/gsa/mid,plink,hg19,individual_chr_split
+GSAv1,late_batch,/data/gsa/late_merged,plink,hg38,merged_batch
 ```
 
-2. **All files exist**
+### What Pipeline Does:
+```
+1. Processes each batch according to its file_structure
+2. Brings all to same state (merged batch, hg38)
+3. Merges all batches into single GSAv1 platform
+```
+
+---
+
+## Scenario 6: VCF Format (Individual or Merged)
+
+**VCF instead of PLINK** - Same logic applies.
+
+### Individual VCF Samples:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+Array_v3,batch1,/vcf/samples,vcf,hg38,individual_samples
+```
+
+Directory contains: `sample_001.vcf.gz`, `sample_002.vcf.gz`, etc.
+
+### Pre-Merged VCF:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+Array_v3,batch2,/vcf/merged/batch2_all,vcf,hg38,merged_batch
+```
+
+File: `batch2_all.vcf.gz`
+
+---
+
+## File Naming Pattern Detection
+
+### How Pipeline Identifies Files
+
+For `individual_samples`:
 ```bash
-# For PLINK files, check .bed files exist:
-while IFS=',' read -r id path type build batch; do
-  if [[ "$type" == "plink" ]]; then
-    if [[ ! -f "${path}.bed" ]]; then
-      echo "ERROR: ${path}.bed not found!"
+# PLINK: Finds *.bed, removes .bed to get prefix
+find ${input_path} -name "*.bed" | sed 's/.bed$//'
+
+# VCF: Finds *.vcf.gz
+find ${input_path} -name "*.vcf.gz"
+```
+
+For `individual_chr_split`:
+```bash
+# Detects pattern: *_chr*.bed or *_chr*.vcf.gz
+# Groups by sample: sample_001_chr1, sample_001_chr2 → sample_001
+```
+
+For `merged_batch`:
+```bash
+# Uses input_path as file prefix directly
+# Expects: ${input_path}.bed/bim/fam OR ${input_path}.vcf.gz
+```
+
+---
+
+## Custom File Patterns (Advanced)
+
+If your files don't match standard patterns, add `file_pattern` column:
+
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure,file_pattern
+GSAv1,special,/data/special,plink,hg19,individual_samples,*_QC_filtered_final.bed
+```
+
+Pipeline will use: `find ${input_path} -name "${file_pattern}"`
+
+---
+
+## Complete Example Sample Sheets
+
+### Example 1: Simple Study (All Same Structure)
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+Omni25,cohort_A,/study1/omni/cohort_a,plink,hg19,individual_samples
+Omni25,cohort_B,/study1/omni/cohort_b,plink,hg19,individual_samples
+Omni25,cohort_C,/study1/omni/cohort_c,plink,hg38,individual_samples
+```
+
+### Example 2: Multi-Platform Meta-Analysis
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+GSAv1,study_A,/arrays/gsa1/study_a,plink,hg19,individual_samples
+GSAv2,study_B,/arrays/gsa2/study_b,plink,hg38,individual_chr_split
+MEGA,study_C,/arrays/mega/merged_c,plink,hg38,merged_batch
+Omni25,study_D,/arrays/omni/study_d,vcf,hg19,individual_samples
+CoreExome,study_E,/exome/study_e/merged,vcf,hg38,merged_chr_split
+```
+
+### Example 3: Incremental Additions
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure
+GSAv3,wave1,/data/wave1/samples,plink,hg38,individual_samples
+GSAv3,wave2,/data/wave2/samples,plink,hg38,individual_samples
+GSAv3,wave3,/data/wave3/samples,plink,hg38,individual_samples
+```
+
+---
+
+## Validation Script
+
+Before running pipeline, validate your sample sheet:
+
+```bash
+#!/bin/bash
+# validate_samplesheet.sh
+
+while IFS=',' read -r platform batch path type build structure; do
+  # Skip header
+  [[ "$platform" == "platform_id" ]] && continue
+  
+  echo "Checking: $platform / $batch"
+  
+  # Check if path exists
+  if [[ "$structure" == "individual_samples" ]] || [[ "$structure" == "individual_chr_split" ]]; then
+    # Should be a directory
+    if [[ ! -d "$path" ]]; then
+      echo "  ✗ ERROR: Directory not found: $path"
+      continue
+    fi
+    
+    # Count files
+    if [[ "$type" == "plink" ]]; then
+      n_files=$(find "$path" -name "*.bed" | wc -l)
+    else
+      n_files=$(find "$path" -name "*.vcf.gz" | wc -l)
+    fi
+    
+    echo "  ✓ Found $n_files files in $path"
+    
+  elif [[ "$structure" == "merged_batch" ]]; then
+    # Should be a file prefix
+    if [[ "$type" == "plink" ]]; then
+      if [[ -f "${path}.bed" ]]; then
+        echo "  ✓ Found merged batch: ${path}.bed"
+      else
+        echo "  ✗ ERROR: File not found: ${path}.bed"
+      fi
+    else
+      if [[ -f "${path}.vcf.gz" ]]; then
+        echo "  ✓ Found merged VCF: ${path}.vcf.gz"
+      else
+        echo "  ✗ ERROR: File not found: ${path}.vcf.gz"
+      fi
+    fi
+    
+  elif [[ "$structure" == "merged_chr_split" ]]; then
+    # Should find chr-split files
+    n_chr=$(find "$(dirname "$path")" -name "$(basename "$path")_chr*.bed" | wc -l)
+    if [[ $n_chr -gt 0 ]]; then
+      echo "  ✓ Found $n_chr chromosome files"
+    else
+      echo "  ✗ ERROR: No chromosome files found"
     fi
   fi
+  
 done < sample_sheet.csv
+
+echo ""
+echo "Validation complete! Check for any ✗ errors above."
 ```
 
-3. **Correct CSV format**
-- No extra commas
-- No spaces (except in file paths if quoted)
-- Header row present
-- Consistent number of columns
+Usage:
+```bash
+chmod +x validate_samplesheet.sh
+./validate_samplesheet.sh
+```
+
+---
+
+## Module 1 Processing Logic
+
+Here's how Module 1 handles each `file_structure`:
+
+```groovy
+workflow PRE_IMPUTATION_QC {
+    take:
+    sample_sheet_ch
+    
+    main:
+    // Branch by file_structure
+    sample_sheet_ch.branch {
+        individual: it[5] == 'individual_samples'
+        chr_split: it[5] == 'individual_chr_split'
+        merged: it[5] == 'merged_batch'
+        merged_chr: it[5] == 'merged_chr_split'
+    }.set { branched }
+    
+    // Path 1: Individual samples (all chr together)
+    individual_samples = DISCOVER_SAMPLES(branched.individual)
+    processed_indiv = PROCESS_INDIVIDUAL_SAMPLE(individual_samples)
+    batch1 = MERGE_BATCH_SAMPLES(processed_indiv)
+    
+    // Path 2: Individual samples (chr split)
+    chr_split_samples = DISCOVER_CHR_SPLIT_SAMPLES(branched.chr_split)
+    concatenated = CONCATENATE_CHROMOSOMES(chr_split_samples)
+    processed_concat = PROCESS_INDIVIDUAL_SAMPLE(concatenated)
+    batch2 = MERGE_BATCH_SAMPLES(processed_concat)
+    
+    // Path 3: Pre-merged batch
+    batch3 = VALIDATE_MERGED_BATCH(branched.merged)
+    
+    // Path 4: Pre-merged, chr split
+    batch4 = MERGE_CHR_SPLIT_BATCH(branched.merged_chr)
+    
+    // Combine all paths
+    all_batches = batch1.mix(batch2, batch3, batch4)
+    
+    // Continue with liftover, strand check, etc.
+    // ... rest of pipeline
+}
+```
+
+---
+
+## Decision Tree: Which file_structure Do I Use?
+
+```
+START: Look at your data
+    ↓
+Q1: Is data already merged at batch level?
+    YES → Q2: Are chromosomes split into separate files?
+              YES → Use: merged_chr_split
+              NO → Use: merged_batch
+    NO → Q3: Are samples split by chromosome?
+              YES → Use: individual_chr_split
+              NO → Use: individual_samples
+```
+
+### Quick Reference:
+
+| What You Have | Use This |
+|---------------|----------|
+| `sample_001.bed` (all chr together) | `individual_samples` |
+| `sample_001_chr1.bed`, `sample_001_chr2.bed`, ... | `individual_chr_split` |
+| `batch1_all_samples.bed` (one file, all chr) | `merged_batch` |
+| `batch1_chr1.bed`, `batch1_chr2.bed`, ... | `merged_chr_split` |
 
 ---
 
 ## Troubleshooting
 
-### "File not found" errors
-- Check paths are correct (try absolute paths)
-- Check file extensions match file_type
-- Check permissions (can you read the files?)
+### Issue: "No samples found"
+**Check**: 
+- Is `input_path` correct?
+- Does `file_structure` match your data?
+- Run validation script
 
-### "Duplicate platform_id" errors
-- Make each platform_id unique
-- Add batch number or date to differentiate
+### Issue: "Duplicate sample IDs"
+**Solution**: 
+- If legitimate duplicates: Set `--allow_duplicate_samples true`
+- If error: Check file naming patterns
 
-### "Invalid build" errors
-- Use only 'hg19' or 'hg38'
-- Check for typos (hg 19, GRCh37, etc. won't work)
+### Issue: "Mixed chromosome counts"
+**Cause**: Some samples missing chromosomes
+**Solution**: Pipeline will warn but continue (QC will filter)
 
-
+### Issue: "Files in both PLINK and VCF format"
+**Solution**: 
+- Create separate rows in sample sheet
+- One row per format type
 
 ---
 
-## Template for Your Use
+## Advanced: Custom Naming Patterns
 
-Save this as `my_sample_sheet.csv`:
+If your files have non-standard names, add `file_pattern`:
+
 ```csv
-platform_id,file_path,file_type,build,collection_batch
-CHANGEME1,/path/to/your/files,plink,hg19,batch1
-CHANGEME2,/path/to/your/files,plink,hg38,batch2
+platform_id,batch_id,input_path,file_type,build,file_structure,file_pattern
+Special,batch1,/data/special,plink,hg19,individual_samples,*_filtered_v2_QC.bed
+Special,batch2,/data/special,plink,hg19,individual_chr_split,*_chr*_final.bed
 ```
 
-Then edit with your actual information!
+Or use regex patterns:
+```csv
+platform_id,batch_id,input_path,file_type,build,file_structure,file_regex
+Complex,batch1,/data,plink,hg19,individual_samples,^[A-Z0-9]+_sample_[0-9]+\.bed$
+```
 
 ---
 
+## Summary
 
-```bash
-nextflow run main.nf --input sample_sheet.csv --outdir results/
-```
+### Supported Input Types:
+✅ Individual samples, all chromosomes together  
+✅ Individual samples, split by chromosome  
+✅ Pre-merged batches  
+✅ Pre-merged batches, split by chromosome  
+✅ PLINK format (.bed/.bim/.fam)  
+✅ VCF format (.vcf.gz)  
+✅ Mixed formats within study  
+✅ Mixed genome builds within platform  
+✅ Custom file naming patterns  
+
+### Key Points:
+1. **Flexibility** - Pipeline adapts to your data structure
+2. **Per-batch specification** - Each batch can be different
+3. **Automatic detection** - Smart file discovery
+4. **Validation** - Check your setup before running
+5. **Parallelization** - Optimized for each structure type
+
+---
+
+**Version**: 2.0 - Multi-structure support  
+**Updated**: November 6, 2024  
+**Status**: Production-ready
