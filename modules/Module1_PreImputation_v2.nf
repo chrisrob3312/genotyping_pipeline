@@ -306,12 +306,11 @@ process MERGE_SAMPLES_TO_BATCH {
 }
 
 // ============================================================================
-// PROCESS 4: FORMAT CHECK AND FIX HG19 BEFORE LIFTOVER
+// PROCESS 4A: FORMAT CHECK AND FIX HG19 (BEFORE LIFTOVER)
 // ============================================================================
-
-process FORMAT_CHECK_AND_FIX_HG19_BEFORE_LIFTOVER {
+process FORMAT_CHECK_AND_FIX_HG19 {
     label 'vcftools'
-    tag "${platform_id}_${batch_id}"
+    tag "${platform_id}_${batch_id}_hg19"
     
     publishDir "${params.outdir}/${platform_id}/${batch_id}/03_hg19_fixes",
         mode: 'copy',
@@ -325,15 +324,16 @@ process FORMAT_CHECK_AND_FIX_HG19_BEFORE_LIFTOVER {
           path(fam),
           val(build)
     path hg19_fasta
+    path hg19_fasta_fai
     
     output:
     tuple val(platform_id),
           val(batch_id),
-          path("${platform_id}_${batch_id}_fixed.bed"),
-          path("${platform_id}_${batch_id}_fixed.bim"),
-          path("${platform_id}_${batch_id}_fixed.fam"),
+          path("${platform_id}_${batch_id}_hg19_fixed.bed"),
+          path("${platform_id}_${batch_id}_hg19_fixed.bim"),
+          path("${platform_id}_${batch_id}_hg19_fixed.fam"),
           val(build),
-          emit: fixed_files
+          emit: hg19_fixed
     
     path("${platform_id}_${batch_id}_hg19_fixes.log"), emit: fix_log
     
@@ -348,41 +348,176 @@ process FORMAT_CHECK_AND_FIX_HG19_BEFORE_LIFTOVER {
     prefix=\$(basename ${bed} .bed)
     
     echo "========================================" | tee ${platform_id}_${batch_id}_hg19_fixes.log
-    echo "FIXING HG19 VARIANTS BEFORE LIFTOVER" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "ALIGNING HG19 VARIANTS TO REFERENCE" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Batch: ${batch_id}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Build: ${build}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Next step: Liftover to hg38" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     echo "========================================" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     
-    # Convert to VCF for bcftools processing
+    # Convert PLINK to VCF
+    echo "Converting PLINK to VCF..." | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     plink2 --bfile \${prefix} \\
            --export vcf bgz \\
            --out temp \\
            --threads ${task.cpus}
     
-    # Count before fixes
-    n_before=\$(bcftools view -H temp.vcf.gz | wc -l)
-    echo "Variants before fixes: \${n_before}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    tabix -p vcf temp.vcf.gz
     
-    # Run bcftools +fixref to make variants concordant with hg19
+    # Count before
+    n_before=\$(bcftools view -H temp.vcf.gz | wc -l)
+    echo "Variants before alignment: \${n_before}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    
+    # Align to hg19 reference
+    echo "" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Aligning to hg19 reference..." | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     bcftools +fixref temp.vcf.gz \\
         --fasta-ref ${hg19_fasta} \\
         --output fixed.vcf.gz \\
         --output-type z \\
+        --threads ${task.cpus} \\
         2>&1 | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     
-    # Count after fixes
+    tabix -p vcf fixed.vcf.gz
+    
+    # Count after
     n_after=\$(bcftools view -H fixed.vcf.gz | wc -l)
     n_removed=\$((n_before - n_after))
+    retention_pct=\$(awk "BEGIN {printf \\"%.2f\\", (\${n_after}/\${n_before})*100}")
     
     echo "" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
-    echo "Variants after fixes: \${n_after}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
-    echo "Variants removed: \${n_removed}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "=== ALIGNMENT RESULTS ===" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  Variants before: \${n_before}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  Variants after:  \${n_after}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  Variants removed: \${n_removed}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  Retention: \${retention_pct}%" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     
     # Convert back to PLINK
+    echo "" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "Converting back to PLINK..." | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
     plink2 --vcf fixed.vcf.gz \\
            --make-bed \\
-           --out ${platform_id}_${batch_id}_fixed \\
+           --out ${platform_id}_${batch_id}_hg19_fixed \\
            --threads ${task.cpus}
     
-    echo "✓ hg19 fixes complete - ready for liftover" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    n_final=\$(wc -l < ${platform_id}_${batch_id}_hg19_fixed.bim)
+    n_samples=\$(wc -l < ${platform_id}_${batch_id}_hg19_fixed.fam)
+    
+    echo "" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "=== OUTPUT ===" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  SNPs: \${n_final}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "  Samples: \${n_samples}" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "✓ hg19 alignment complete → Ready for liftover" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    echo "========================================" | tee -a ${platform_id}_${batch_id}_hg19_fixes.log
+    """
+}
+
+// ============================================================================
+// PROCESS 4B: FORMAT CHECK AND FIX HG38 (NO LIFTOVER NEEDED)
+// ============================================================================
+process FORMAT_CHECK_AND_FIX_HG38 {
+    label 'vcftools'
+    tag "${platform_id}_${batch_id}_hg38"
+    
+    publishDir "${params.outdir}/${platform_id}/${batch_id}/03_hg38_fixes",
+        mode: 'copy',
+        pattern: "*.{log,txt}"
+    
+    input:
+    tuple val(platform_id),
+          val(batch_id),
+          path(bed),
+          path(bim),
+          path(fam),
+          val(build)
+    path hg38_fasta
+    path hg38_fasta_fai
+    
+    output:
+    tuple val(platform_id),
+          val(batch_id),
+          path("${platform_id}_${batch_id}_hg38_fixed.bed"),
+          path("${platform_id}_${batch_id}_hg38_fixed.bim"),
+          path("${platform_id}_${batch_id}_hg38_fixed.fam"),
+          val('hg38'),  // Output is hg38
+          emit: hg38_fixed
+    
+    path("${platform_id}_${batch_id}_hg38_fixes.log"), emit: fix_log
+    
+    when:
+    build == 'hg38'
+    
+    script:
+    """
+    #!/bin/bash
+    set -euo pipefail
+    
+    prefix=\$(basename ${bed} .bed)
+    
+    echo "========================================" | tee ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "ALIGNING HG38 VARIANTS TO REFERENCE" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Batch: ${batch_id}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Build: ${build}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Next step: SKIP liftover (already hg38)" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "========================================" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    
+    # Convert PLINK to VCF
+    echo "Converting PLINK to VCF..." | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    plink2 --bfile \${prefix} \\
+           --export vcf bgz \\
+           --out temp \\
+           --threads ${task.cpus}
+    
+    tabix -p vcf temp.vcf.gz
+    
+    # Count before
+    n_before=\$(bcftools view -H temp.vcf.gz | wc -l)
+    echo "Variants before alignment: \${n_before}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    
+    # Align to hg38 reference
+    echo "" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Aligning to hg38 reference..." | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    bcftools +fixref temp.vcf.gz \\
+        --fasta-ref ${hg38_fasta} \\
+        --output fixed.vcf.gz \\
+        --output-type z \\
+        --threads ${task.cpus} \\
+        2>&1 | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    
+    tabix -p vcf fixed.vcf.gz
+    
+    # Count after
+    n_after=\$(bcftools view -H fixed.vcf.gz | wc -l)
+    n_removed=\$((n_before - n_after))
+    retention_pct=\$(awk "BEGIN {printf \\"%.2f\\", (\${n_after}/\${n_before})*100}")
+    
+    echo "" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "=== ALIGNMENT RESULTS ===" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  Variants before: \${n_before}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  Variants after:  \${n_after}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  Variants removed: \${n_removed}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  Retention: \${retention_pct}%" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    
+    # Convert back to PLINK
+    echo "" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "Converting back to PLINK..." | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    plink2 --vcf fixed.vcf.gz \\
+           --make-bed \\
+           --out ${platform_id}_${batch_id}_hg38_fixed \\
+           --threads ${task.cpus}
+    
+    n_final=\$(wc -l < ${platform_id}_${batch_id}_hg38_fixed.bim)
+    n_samples=\$(wc -l < ${platform_id}_${batch_id}_hg38_fixed.fam)
+    
+    echo "" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "=== OUTPUT ===" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  SNPs: \${n_final}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "  Samples: \${n_samples}" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "✓ hg38 alignment complete → Skipping liftover" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
+    echo "========================================" | tee -a ${platform_id}_${batch_id}_hg38_fixes.log
     """
 }
 
