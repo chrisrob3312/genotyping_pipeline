@@ -141,38 +141,61 @@ process PREPARE_SAMPLES_AND_BATCHES {
     echo "Structure: ${file_structure}" | tee -a ${sample_id}_prep.log
     echo "NO QC APPLIED - FORMAT CONVERSION ONLY" | tee -a ${sample_id}_prep.log
     
-    # Handle different input structures
-    if [[ "${file_structure}" == "individual_chr_split" ]]; then
-        # Concatenate chromosomes first
-        echo "Concatenating chr1-22..." | tee -a ${sample_id}_prep.log
-        
-        for chr in {1..22}; do
-            if [[ -f "${sample_id}_chr\${chr}.bed" ]]; then
-                echo "  chr\${chr}" | tee -a ${sample_id}_prep.log
-            fi
-        done
-        
-        # Merge chromosomes
-        plink --merge-list <(ls ${sample_id}_chr*.bed | sed 's/.bed//') \\
-              --make-bed \\
-              --out ${sample_id} \\
-              --threads ${task.cpus}
+   # Handle different input structures
+if [[ "${file_structure}" == "individual_chr_split" && "${file_type}" == "vcf" ]]; then
+    # Case 1: VCF files split by chromosome
+    echo "=== Concatenating VCF chromosomes ===" | tee -a ${sample_id}_prep.log
     
-    elif [[ "${file_type}" == "vcf" ]]; then
-        # Convert VCF to PLINK
-        echo "Converting VCF to PLINK..." | tee -a ${sample_id}_prep.log
-        
-        plink2 --vcf ${sample_id}.vcf.gz \\
-               --make-bed \\
-               --out ${sample_id} \\
-               --threads ${task.cpus}
+    for chr in {1..22}; do
+        if [[ -f "${sample_id}_chr${chr}.vcf.gz" ]]; then
+            echo "${sample_id}_chr${chr}.vcf.gz" >> vcf_list.txt
+            echo "  Found chr${chr}" | tee -a ${sample_id}_prep.log
+        fi
+    done
     
-    else
-        # Already PLINK format - just link
-        ln -s ${sample_id}.bed ${sample_id}.bed
-        ln -s ${sample_id}.bim ${sample_id}.bim
-        ln -s ${sample_id}.fam ${sample_id}.fam
-    fi
+    bcftools concat \\
+        --file-list vcf_list.txt \\
+        --output ${sample_id}_merged.vcf.gz \\
+        --output-type z \\
+        --threads ${task.cpus}
+    
+    bcftools index ${sample_id}_merged.vcf.gz
+    
+    plink2 --vcf ${sample_id}_merged.vcf.gz \\
+           --make-bed \\
+           --out ${sample_id} \\
+           --threads ${task.cpus}
+
+elif [[ "${file_structure}" == "individual_chr_split" && "${file_type}" == "plink" ]]; then
+    # Case 2: PLINK files split by chromosome
+    echo "=== Concatenating PLINK chromosomes ===" | tee -a ${sample_id}_prep.log
+    
+    for chr in {1..22}; do
+        if [[ -f "${sample_id}_chr${chr}.bed" ]]; then
+            echo "${sample_id}_chr${chr}" >> merge_list.txt
+            echo "  Found chr${chr}" | tee -a ${sample_id}_prep.log
+        fi
+    done
+    
+    plink --merge-list merge_list.txt \\
+          --make-bed \\
+          --out ${sample_id} \\
+          --threads ${task.cpus}
+
+elif [[ "${file_type}" == "vcf" ]]; then
+    # Case 3: Single VCF file (not split by chromosome)
+    echo "=== Converting VCF to PLINK ===" | tee -a ${sample_id}_prep.log
+    
+    plink2 --vcf ${sample_id}.vcf.gz \\
+           --make-bed \\
+           --out ${sample_id} \\
+           --threads ${task.cpus}
+
+else
+    # Case 4: Already PLINK format, single file
+    echo "=== Files already in PLINK format ===" | tee -a ${sample_id}_prep.log
+    # Files are already staged by Nextflow with correct names
+fi
     
     # Count variants (NO FILTERING)
     n_snps=\$(wc -l < ${sample_id}.bim)
@@ -222,49 +245,64 @@ process MERGE_SAMPLES_TO_BATCH {
     set -euo pipefail
     
     echo "========================================" | tee ${platform_id}_${batch_id}_merge.log
-    echo "MERGING SAMPLES TO BATCH" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "MERGING SAMPLES TO BATCH (UNION MERGE)" | tee -a ${platform_id}_${batch_id}_merge.log
     echo "Platform: ${platform_id}" | tee -a ${platform_id}_${batch_id}_merge.log
     echo "Batch: ${batch_id}" | tee -a ${platform_id}_${batch_id}_merge.log
     echo "Files: ${n_files}" | tee -a ${platform_id}_${batch_id}_merge.log
-    echo "NO QC FILTERS APPLIED" | tee -a ${platform_id}_${batch_id}_merge.log
     echo "========================================" | tee -a ${platform_id}_${batch_id}_merge.log
     
     if [[ ${n_files} -eq 1 ]]; then
         # Single file - just rename
+        echo "Single file - no merge needed" | tee -a ${platform_id}_${batch_id}_merge.log
         mv ${bed_files} ${platform_id}_${batch_id}.bed
         mv ${bim_files} ${platform_id}_${batch_id}.bim
         mv ${fam_files} ${platform_id}_${batch_id}.fam
-        echo "Single file - no merge needed" | tee -a ${platform_id}_${batch_id}_merge.log
     
     else
-        # Multiple files - simple merge (intersection of SNPs)
+        # Multiple files - UNION merge (keeps ALL variants)
+        echo "Performing UNION merge (mode 6)..." | tee -a ${platform_id}_${batch_id}_merge.log
+        echo "  - Keeps all variants whether in all files or not" | tee -a ${platform_id}_${batch_id}_merge.log
+        echo "  - Auto-resolves strand/allele conflicts" | tee -a ${platform_id}_${batch_id}_merge.log
+        echo "  - Strand fixing happens later with bcftools" | tee -a ${platform_id}_${batch_id}_merge.log
+        
+        # Create merge list
         ls *.bed | sed 's/.bed\$//' > merge_list.txt
         
+        # Count variants before merge
+        echo "" | tee -a ${platform_id}_${batch_id}_merge.log
+        echo "Input files:" | tee -a ${platform_id}_${batch_id}_merge.log
+        for bim in *.bim; do
+            n=\$(wc -l < \${bim})
+            echo "  \${bim}: \${n} variants" | tee -a ${platform_id}_${batch_id}_merge.log
+        done
+        
+        # Union merge with mode 6
         plink --merge-list merge_list.txt \\
+              --merge-mode 6 \\
               --make-bed \\
               --out ${platform_id}_${batch_id} \\
-              --threads ${task.cpus}
+              --threads ${task.cpus} \\
+              --allow-no-sex
     fi
     
-    # Log results
+    # Log final results
     n_snps=\$(wc -l < ${platform_id}_${batch_id}.bim)
     n_samples=\$(wc -l < ${platform_id}_${batch_id}.fam)
     
-    cat >> ${platform_id}_${batch_id}_merge.log << EOF
-
-OUTPUT:
-  SNPs: \${n_snps}
-  Samples: \${n_samples}
-  
-NOTE: NO QC APPLIED AT THIS STAGE
-      Raw variant counts maintained
-      
-✓ Batch merge complete
-========================================
-EOF
-
-    cat ${platform_id}_${batch_id}_merge.log
+    echo "" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "=== MERGED OUTPUT ===" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "  SNPs: \${n_snps}" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "  Samples: \${n_samples}" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "NOTE: UNION merge - includes all variants across samples" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "      Strand/allele issues resolved using first file's coding" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "      Final strand correction happens in strand-fixing step" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "      NO QC FILTERS APPLIED" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "✓ Batch merge complete" | tee -a ${platform_id}_${batch_id}_merge.log
+    echo "========================================" | tee -a ${platform_id}_${batch_id}_merge.log
     """
+
 }
 
 // ============================================================================
