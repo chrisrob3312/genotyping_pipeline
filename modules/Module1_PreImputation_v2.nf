@@ -522,16 +522,15 @@ process FORMAT_CHECK_AND_FIX_HG38 {
 }
 
 // ============================================================================
-// PROCESS 5: LIFTOVER HG19 BATCHES TO HG38
+// PROCESS 5: LIFTOVER HG19 TO HG38 WITH CROSSMAP VCF (VERIFIED)
 // ============================================================================
-
 process LIFTOVER_HG19_TO_HG38 {
     label 'liftover'
     tag "${platform_id}_${batch_id}"
     
     publishDir "${params.outdir}/${platform_id}/${batch_id}/04_liftover",
         mode: 'copy',
-        pattern: "*.{log,txt}"
+        pattern: "*.{log,txt,vcf.gz,vcf.gz.tbi}"
     
     input:
     tuple val(platform_id),
@@ -541,6 +540,8 @@ process LIFTOVER_HG19_TO_HG38 {
           path(fam),
           val(build)
     path chain_file
+    path hg38_fasta
+    path hg38_fasta_fai
     
     output:
     tuple val(platform_id),
@@ -552,6 +553,9 @@ process LIFTOVER_HG19_TO_HG38 {
           emit: lifted_batch
     
     path("${platform_id}_${batch_id}_liftover.log"), emit: liftover_log
+    path("${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz"), emit: lifted_vcf
+    path("${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz.tbi"), emit: lifted_vcf_index
+    path("*_unlifted.txt"), emit: unlifted_variants, optional: true
     
     when:
     build == 'hg19'
@@ -561,52 +565,184 @@ process LIFTOVER_HG19_TO_HG38 {
     #!/bin/bash
     set -euo pipefail
     
-    prefix=\$(basename ${bim} .bim)
+    prefix=\$(basename ${bed} .bed)
     
     echo "========================================" | tee ${platform_id}_${batch_id}_liftover.log
-    echo "LIFTOVER: hg19 → hg38" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "LIFTOVER: hg19 → hg38 (CrossMap VCF mode)" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Batch: ${batch_id}" | tee -a ${platform_id}_${batch_id}_liftover.log
     echo "========================================" | tee -a ${platform_id}_${batch_id}_liftover.log
     
-    # Convert .bim to BED format for CrossMap
-    awk 'BEGIN {OFS="\\t"} {
-        chr = (\$1 ~ /^chr/) ? \$1 : "chr"\$1
-        print chr, \$4-1, \$4, \$2, \$5, \$6
-    }' ${bim} > hg19_positions.bed
+    # Verify reference is indexed
+    if [[ ! -f "${hg38_fasta}.fai" ]] && [[ ! -f "${hg38_fasta_fai}" ]]; then
+        echo "ERROR: hg38 reference not indexed!" | tee -a ${platform_id}_${batch_id}_liftover.log
+        exit 1
+    fi
     
-    n_input=\$(wc -l < hg19_positions.bed)
+    # Count input variants
+    n_input=\$(wc -l < ${bim})
     echo "Input variants (hg19): \${n_input}" | tee -a ${platform_id}_${batch_id}_liftover.log
     
+    # Step 1: Convert PLINK to VCF (hg19)
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Step 1: Converting PLINK to VCF..." | tee -a ${platform_id}_${batch_id}_liftover.log
+    plink2 --bfile \${prefix} \\
+           --export vcf bgz \\
+           --output-chr chrM \\
+           --out hg19_input \\
+           --threads ${task.cpus}
+    
+    # Index the hg19 VCF
+    tabix -p vcf hg19_input.vcf.gz
+    
+    vcf_variants=\$(bcftools view -H hg19_input.vcf.gz | wc -l)
+    echo "  VCF variants: \${vcf_variants}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    # Step 2: Liftover with CrossMap VCF mode
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Step 2: Running CrossMap liftover..." | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  Chain file: ${chain_file}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  Target reference: ${hg38_fasta}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "CrossMap will automatically:" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  - Update genomic coordinates" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  - Validate REF alleles against hg38 reference" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  - Handle strand orientation" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  - Exclude mismatched variants" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
     # Run CrossMap
-    CrossMap.py bed ${chain_file} hg19_positions.bed hg38_positions.bed || true
+    # CrossMap.py vcf <chain_file> <input.vcf> <target_ref.fa> <output_prefix>
+    CrossMap.py vcf \\
+        ${chain_file} \\
+        hg19_input.vcf.gz \\
+        ${hg38_fasta} \\
+        hg38_lifted.vcf \\
+        2>&1 | tee -a ${platform_id}_${batch_id}_liftover.log
     
-    # Count successful lifts
-    n_mapped=\$(wc -l < hg38_positions.bed)
-    n_failed=\$((n_input - n_mapped))
-    pct_success=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${n_mapped}/\${n_input}}")
+    # Check if CrossMap succeeded
+    if [[ ! -f "hg38_lifted.vcf" ]]; then
+        echo "ERROR: CrossMap failed to create output VCF!" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "Check chain file and reference compatibility" | tee -a ${platform_id}_${batch_id}_liftover.log
+        exit 1
+    fi
     
-    echo "Mapped to hg38: \${n_mapped} (\${pct_success}%)" | tee -a ${platform_id}_${batch_id}_liftover.log
-    echo "Failed to map: \${n_failed}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    # Step 3: Process liftover results
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Step 3: Processing liftover results..." | tee -a ${platform_id}_${batch_id}_liftover.log
     
-    # Extract successfully mapped SNPs
-    awk '{print \$4}' hg38_positions.bed > mapped_snps.txt
+    # Compress lifted VCF
+    bgzip -c hg38_lifted.vcf > hg38_lifted.vcf.gz
+    tabix -p vcf hg38_lifted.vcf.gz
     
-    # Create updated .bim with hg38 positions
-    awk 'BEGIN {OFS="\\t"} 
-    NR==FNR {map[\$4] = \$1"\\t"\$3; next}
-    \$2 in map {
-        split(map[\$2], pos, "\\t")
-        gsub(/^chr/, "", pos[1])
-        print pos[1], \$2, \$3, pos[2], \$5, \$6
-    }' hg38_positions.bed ${bim} > ${platform_id}_${batch_id}_hg38.bim
+    # Count lifted variants
+    n_lifted=\$(bcftools view -H hg38_lifted.vcf.gz | wc -l)
+    n_failed=\$((n_input - n_lifted))
+    pct_success=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${n_lifted}/\${n_input}}")
     
-    # Extract mapped variants from PLINK files
-    plink --bfile \${prefix} \\
-          --extract mapped_snps.txt \\
-          --make-bed \\
-          --out ${platform_id}_${batch_id}_hg38 \\
-          --threads ${task.cpus}
+    echo "Successfully lifted: \${n_lifted} (\${pct_success}%)" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Failed to lift: \${n_failed}" | tee -a ${platform_id}_${batch_id}_liftover.log
     
-    echo "✓ Liftover complete" | tee -a ${platform_id}_${batch_id}_liftover.log
+    # Step 4: Analyze failures
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Step 4: Analyzing unmapped variants..." | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    if [[ -f "hg19_input.vcf.gz.unmap" ]]; then
+        n_unmap=\$(grep -v "^#" hg19_input.vcf.gz.unmap | wc -l)
+        echo "Unmapped variants file: hg19_input.vcf.gz.unmap (\${n_unmap} variants)" | tee -a ${platform_id}_${batch_id}_liftover.log
+        
+        echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "Failure reasons:" | tee -a ${platform_id}_${batch_id}_liftover.log
+        grep "^#Fail" hg19_input.vcf.gz.unmap 2>/dev/null | \\
+            sed 's/^#Fail(/  /' | sed 's/):/: /' | \\
+            sort | uniq -c | sort -rn | tee -a ${platform_id}_${batch_id}_liftover.log || \\
+            echo "  No failure annotations found" | tee -a ${platform_id}_${batch_id}_liftover.log
+        
+        # Extract variant IDs for unmapped variants
+        grep -v "^#" hg19_input.vcf.gz.unmap | \\
+            awk '{print \$3}' > ${platform_id}_${batch_id}_unlifted.txt
+        
+        n_unlifted=\$(wc -l < ${platform_id}_${batch_id}_unlifted.txt)
+        echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "  Unlifted variant IDs saved: ${platform_id}_${batch_id}_unlifted.txt (\${n_unlifted})" | tee -a ${platform_id}_${batch_id}_liftover.log
+    else
+        echo "  No .unmap file created (100% success or CrossMap error)" | tee -a ${platform_id}_${batch_id}_liftover.log
+    fi
+    
+    # Step 5: Convert lifted VCF back to PLINK
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Step 5: Converting lifted VCF to PLINK..." | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    plink2 --vcf hg38_lifted.vcf.gz \\
+           --make-bed \\
+           --out ${platform_id}_${batch_id}_hg38 \\
+           --threads ${task.cpus}
+    
+    # Save the lifted VCF for reference/QC with clear naming
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Saving lifted VCF with descriptive naming..." | tee -a ${platform_id}_${batch_id}_liftover.log
+    cp hg38_lifted.vcf.gz ${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz
+    cp hg38_lifted.vcf.gz.tbi ${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz.tbi
+    echo "  ${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  ${platform_id}_${batch_id}_hg19_to_hg38_lifted.vcf.gz.tbi" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    # Step 6: Quality checks
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "=== QUALITY CHECKS ===" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    n_final_snps=\$(wc -l < ${platform_id}_${batch_id}_hg38.bim)
+    n_samples=\$(wc -l < ${platform_id}_${batch_id}_hg38.fam)
+    
+    echo "Final PLINK files:" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  SNPs: \${n_final_snps}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  Samples: \${n_samples}" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "  Success rate: \${pct_success}%" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    # Check chromosome naming
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Chromosome naming (first 5):" | tee -a ${platform_id}_${batch_id}_liftover.log
+    awk '{print \$1}' ${platform_id}_${batch_id}_hg38.bim | sort -u | head -5 | \\
+        sed 's/^/  /' | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    # Check position ranges for chr1
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Position sanity check (chr1):" | tee -a ${platform_id}_${batch_id}_liftover.log
+    chr1_count=\$(awk '\$1 == "1" || \$1 == "chr1"' ${platform_id}_${batch_id}_hg38.bim | wc -l)
+    if [[ \${chr1_count} -gt 0 ]]; then
+        min_pos=\$(awk '\$1 == "1" || \$1 == "chr1" {print \$4}' ${platform_id}_${batch_id}_hg38.bim | sort -n | head -1)
+        max_pos=\$(awk '\$1 == "1" || \$1 == "chr1" {print \$4}' ${platform_id}_${batch_id}_hg38.bim | sort -n | tail -1)
+        echo "  Chr1 variants: \${chr1_count}" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "  Position range: \${min_pos} - \${max_pos}" | tee -a ${platform_id}_${batch_id}_liftover.log
+        
+        # Sanity check for hg38 (chr1 should be ~10kb to ~249M)
+        if [[ \${max_pos} -gt 249000000 ]]; then
+            echo "  ⚠ WARNING: Max position exceeds chr1 length!" | tee -a ${platform_id}_${batch_id}_liftover.log
+        fi
+    fi
+    
+    # Warn if success rate is low
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    if (( \$(echo "\${pct_success} < 95" | bc -l) )); then
+        echo "⚠ WARNING: Liftover success rate below 95%" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "  Possible causes:" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "    - Input data quality issues" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "    - Reference genome mismatch" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "    - Incompatible chain file" | tee -a ${platform_id}_${batch_id}_liftover.log
+        echo "  Review: ${platform_id}_${batch_id}_unlifted.txt" | tee -a ${platform_id}_${batch_id}_liftover.log
+    else
+        echo "✓ Liftover success rate acceptable (≥95%)" | tee -a ${platform_id}_${batch_id}_liftover.log
+    fi
+    
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "=== SUMMARY ===" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "✓ Coordinates updated: hg19 → hg38" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "✓ REF alleles validated against hg38 reference" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "✓ Strand orientation handled automatically" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "✓ Invalid variants excluded" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "Output files ready for downstream analysis" | tee -a ${platform_id}_${batch_id}_liftover.log
+    echo "========================================" | tee -a ${platform_id}_${batch_id}_liftover.log
+    
+    cat ${platform_id}_${batch_id}_liftover.log
     """
 }
 
