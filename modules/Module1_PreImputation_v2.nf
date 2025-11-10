@@ -1351,82 +1351,153 @@ workflow PRE_IMPUTATION_QC {
     
     main:
     
-    // Step 1: Discover files
+    // ========================================================================
+    // STEP 1: DISCOVER FILES
+    // ========================================================================
     DISCOVER_AND_LOAD_SAMPLES(sample_sheet_ch)
     
-    // Step 2: Prepare samples (NO QC)
-    // Branch based on file structure and prepare accordingly
-    // [Implementation would expand here for different structures]
+    // ========================================================================
+    // STEP 2: PREPARE SAMPLES (FORMAT CONVERSION ONLY - NO QC)
+    // ========================================================================
     
-    // Step 3: Merge samples to batches (NO QC)
-    MERGE_SAMPLES_TO_BATCH(prepared_samples.groupTuple(by: [0, 1]))
-    
-    // Step 4: Fix hg19 before liftover
-    hg19_batches = MERGE_SAMPLES_TO_BATCH.out.batch_merged.filter { it[5] == 'hg19' }
-    hg38_batches = MERGE_SAMPLES_TO_BATCH.out.batch_merged.filter { it[5] == 'hg38' }
-    
-    FORMAT_CHECK_AND_FIX_HG19_BEFORE_LIFTOVER(
-        hg19_batches,
-        file(params.hg19_fasta)
-    )
-    
-    // Step 5: Liftover hg19 → hg38
-    LIFTOVER_HG19_TO_HG38(
-        FORMAT_CHECK_AND_FIX_HG19_BEFORE_LIFTOVER.out.fixed_files,
-        file(params.liftover_chain)
-    )
-    
-    // Combine all hg38 batches
-    all_hg38 = LIFTOVER_HG19_TO_HG38.out.lifted_batch
-        .mix(hg38_batches)
-    
-    // Step 6: Union merge batches to platform (3-pass)
-    all_hg38
-        .map { platform, batch, bed, bim, fam, build ->
-            tuple(platform, bed, bim, fam)
+    // Expand discovered files into individual sample entries
+    DISCOVER_AND_LOAD_SAMPLES.out.discovered_files
+        .flatMap { platform_id, batch_id, file_list, file_type, build, file_structure ->
+            // Read file list and create tuple for each sample
+            def samples = file(file_list).readLines()
+            samples.collect { sample_path ->
+                def sample_id = file(sample_path).getBaseName()
+                tuple(platform_id, batch_id, sample_id, file_type, build, file_structure)
+            }
         }
-        .groupTuple(by: 0)
-        .set { grouped_for_merge }
+        .set { samples_to_prepare }
     
-    UNION_MERGE_BATCHES_TO_PLATFORM(grouped_for_merge)
+    // Prepare each sample
+    PREPARE_SAMPLES_AND_BATCHES(samples_to_prepare)
     
-    // Step 7: Separate strand checking for each service
+    // ========================================================================
+    // STEP 3: MERGE SAMPLES TO BATCHES (UNION MERGE - NO QC)
+    // ========================================================================
+    
+    // Group prepared samples by platform and batch for merging
+    PREPARE_SAMPLES_AND_BATCHES.out.prepared_samples
+        .groupTuple(by: [0, 1])  // Group by platform_id and batch_id
+        .set { samples_grouped_by_batch }
+    
+    MERGE_SAMPLES_TO_BATCH(samples_grouped_by_batch)
+    
+    // ========================================================================
+    // STEP 4: ALIGN TO APPROPRIATE REFERENCE (BUILD-SPECIFIC)
+    // ========================================================================
+    
+    // Split by genome build
+    hg19_batches = MERGE_SAMPLES_TO_BATCH.out.batch_merged
+        .filter { it[5] == 'hg19' }
+    
+    hg38_batches = MERGE_SAMPLES_TO_BATCH.out.batch_merged
+        .filter { it[5] == 'hg38' }
+    
+    // Fix hg19 batches (align to hg19.fa before liftover)
+    FORMAT_CHECK_AND_FIX_HG19(
+        hg19_batches,
+        file(params.hg19_fasta),
+        file("${params.hg19_fasta}.fai")
+    )
+    
+    // Fix hg38 batches (align to hg38.fa, no liftover needed)
+    FORMAT_CHECK_AND_FIX_HG38(
+        hg38_batches,
+        file(params.hg38_fasta),
+        file("${params.hg38_fasta}.fai")
+    )
+    
+    // ========================================================================
+    // STEP 5: LIFTOVER HG19 → HG38
+    // ========================================================================
+    
+    LIFTOVER_HG19_TO_HG38(
+        FORMAT_CHECK_AND_FIX_HG19.out.hg19_fixed,
+        file(params.liftover_chain),
+        file(params.hg38_fasta),
+        file("${params.hg38_fasta}.fai")
+    )
+    
+    // ========================================================================
+    // STEP 6: COMBINE ALL HG38 BATCHES AND MERGE TO PLATFORM
+    // ========================================================================
+    
+    // Combine lifted hg19 batches with native hg38 batches
+    all_hg38_batches = LIFTOVER_HG19_TO_HG38.out.lifted_batch
+        .mix(FORMAT_CHECK_AND_FIX_HG38.out.hg38_fixed)
+    
+    // Group batches by platform for platform-level merge
+    all_hg38_batches
+        .map { platform_id, batch_id, bed, bim, fam, build ->
+            tuple(platform_id, batch_id, bed, bim, fam)
+        }
+        .groupTuple(by: 0)  // Group by platform_id
+        .set { batches_grouped_by_platform }
+    
+    UNION_MERGE_BATCHES_TO_PLATFORM(batches_grouped_by_platform)
+    
+    // ========================================================================
+    // STEP 7: SERVICE-SPECIFIC VALIDATION (QC CHECKS ONLY)
+    // ========================================================================
+    
+    // TOPMed validation
     TOPMED_STRAND_CHECK(
         UNION_MERGE_BATCHES_TO_PLATFORM.out.platform_merged,
         file("${projectDir}/bin/check-strand-topmed.pl"),
         file(params.topmed_reference)
     )
     
-    ANVIL_STRAND_CHECK(
-        UNION_MERGE_BATCHES_TO_PLATFORM.out.platform_merged,
-        file(params.hg38_fasta)
+    // AnVIL validation
+    ANVIL_VALIDATION(
+        UNION_MERGE_BATCHES_TO_PLATFORM.out.platform_merged
     )
     
-    // Combine both service paths
-    both_services = TOPMED_STRAND_CHECK.out.topmed_strand_files
-        .mix(ANVIL_STRAND_CHECK.out.anvil_fixed_files)
+    // ========================================================================
+    // STEP 8: LIGHT QC (NO STRAND FIXING - ALREADY ALIGNED)
+    // ========================================================================
     
-    // Step 8: Apply fixes and Light QC (FIRST TIME!)
-    APPLY_FIXES_AND_LIGHT_QC(both_services)
+    // Combine both service validation outputs
+    both_services = TOPMED_STRAND_CHECK.out.topmed_validated_files
+        .mix(ANVIL_VALIDATION.out.anvil_validated_files)
     
-    // Step 9: Split by chromosome and create service-specific VCFs
+    LIGHT_QC_BEFORE_IMPUTATION(both_services)
+    
+    // ========================================================================
+    // STEP 9: CREATE SERVICE-SPECIFIC VCFS BY CHROMOSOME
+    // ========================================================================
+    
+    // Create chromosome channel
     chromosomes = Channel.of(1..22)
     
-    APPLY_FIXES_AND_LIGHT_QC.out.qc_plink
+    // Combine QC'd data with chromosome numbers
+    LIGHT_QC_BEFORE_IMPUTATION.out.qc_plink
         .combine(chromosomes)
+        .map { platform_id, bed, bim, fam, service, chr ->
+            tuple(platform_id, chr, bed, bim, fam, service)
+        }
         .set { for_vcf_creation }
     
     CREATE_SERVICE_SPECIFIC_VCFS(for_vcf_creation)
     
+    // ========================================================================
+    // EMIT OUTPUTS
+    // ========================================================================
+    
     emit:
     imputation_vcfs = CREATE_SERVICE_SPECIFIC_VCFS.out.service_vcfs
-    qc_logs = APPLY_FIXES_AND_LIGHT_QC.out.qc_log
+    qc_logs = LIGHT_QC_BEFORE_IMPUTATION.out.qc_log
     union_logs = UNION_MERGE_BATCHES_TO_PLATFORM.out.union_log
     vcf_logs = CREATE_SERVICE_SPECIFIC_VCFS.out.vcf_log
+    topmed_validation_logs = TOPMED_STRAND_CHECK.out.topmed_validation_log
+    anvil_validation_logs = ANVIL_VALIDATION.out.anvil_validation_log
 }
 
 // ============================================================================
-// REQUIRED PARAMETERS
+// REQUIRED PARAMETERS THAT NEED TO BE UPDATED IN NEXTFLOW.CONFIG FOR MODULE 1
 // ============================================================================
 /*
  * params {
