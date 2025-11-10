@@ -271,118 +271,116 @@ GSAv3,wave3,/data/wave3/samples,plink,hg38,individual_samples
 
 ---
 
-## Validation Script
-
-Before running pipeline, validate your sample sheet:
-
-```bash
-#!/bin/bash
-# validate_samplesheet.sh
-
-while IFS=',' read -r platform batch path type build structure; do
-  # Skip header
-  [[ "$platform" == "platform_id" ]] && continue
-  
-  echo "Checking: $platform / $batch"
-  
-  # Check if path exists
-  if [[ "$structure" == "individual_samples" ]] || [[ "$structure" == "individual_chr_split" ]]; then
-    # Should be a directory
-    if [[ ! -d "$path" ]]; then
-      echo "  ✗ ERROR: Directory not found: $path"
-      continue
-    fi
-    
-    # Count files
-    if [[ "$type" == "plink" ]]; then
-      n_files=$(find "$path" -name "*.bed" | wc -l)
-    else
-      n_files=$(find "$path" -name "*.vcf.gz" | wc -l)
-    fi
-    
-    echo "  ✓ Found $n_files files in $path"
-    
-  elif [[ "$structure" == "merged_batch" ]]; then
-    # Should be a file prefix
-    if [[ "$type" == "plink" ]]; then
-      if [[ -f "${path}.bed" ]]; then
-        echo "  ✓ Found merged batch: ${path}.bed"
-      else
-        echo "  ✗ ERROR: File not found: ${path}.bed"
-      fi
-    else
-      if [[ -f "${path}.vcf.gz" ]]; then
-        echo "  ✓ Found merged VCF: ${path}.vcf.gz"
-      else
-        echo "  ✗ ERROR: File not found: ${path}.vcf.gz"
-      fi
-    fi
-    
-  elif [[ "$structure" == "merged_chr_split" ]]; then
-    # Should find chr-split files
-    n_chr=$(find "$(dirname "$path")" -name "$(basename "$path")_chr*.bed" | wc -l)
-    if [[ $n_chr -gt 0 ]]; then
-      echo "  ✓ Found $n_chr chromosome files"
-    else
-      echo "  ✗ ERROR: No chromosome files found"
-    fi
-  fi
-  
-done < sample_sheet.csv
-
-echo ""
-echo "Validation complete! Check for any ✗ errors above."
-```
-
-Usage:
-```bash
-chmod +x validate_samplesheet.sh
-./validate_samplesheet.sh
-```
-
----
-
 ## Module 1 Processing Logic
 
-Here's how Module 1 handles each `file_structure`:
+Module 1 processes **all entries through the same sequence of processes**, with behavior adapting based on `file_structure`. There is no branching - instead, conditional logic inside each process handles different input types.
 
-```groovy
-workflow PRE_IMPUTATION_QC {
-    take:
-    sample_sheet_ch
-    
-    main:
-    // Branch by file_structure
-    sample_sheet_ch.branch {
-        individual: it[5] == 'individual_samples'
-        chr_split: it[5] == 'individual_chr_split'
-        merged: it[5] == 'merged_batch'
-        merged_chr: it[5] == 'merged_chr_split'
-    }.set { branched }
-    
-    // Path 1: Individual samples (all chr together)
-    individual_samples = DISCOVER_SAMPLES(branched.individual)
-    processed_indiv = PROCESS_INDIVIDUAL_SAMPLE(individual_samples)
-    batch1 = MERGE_BATCH_SAMPLES(processed_indiv)
-    
-    // Path 2: Individual samples (chr split)
-    chr_split_samples = DISCOVER_CHR_SPLIT_SAMPLES(branched.chr_split)
-    concatenated = CONCATENATE_CHROMOSOMES(chr_split_samples)
-    processed_concat = PROCESS_INDIVIDUAL_SAMPLE(concatenated)
-    batch2 = MERGE_BATCH_SAMPLES(processed_concat)
-    
-    // Path 3: Pre-merged batch
-    batch3 = VALIDATE_MERGED_BATCH(branched.merged)
-    
-    // Path 4: Pre-merged, chr split
-    batch4 = MERGE_CHR_SPLIT_BATCH(branched.merged_chr)
-    
-    // Combine all paths
-    all_batches = batch1.mix(batch2, batch3, batch4)
-    
-    // Continue with liftover, strand check, etc.
-    // ... rest of pipeline
-}
+### Actual Workflow Flow:
+
+```
+ALL ENTRIES → DISCOVER_AND_LOAD_SAMPLES
+              ↓
+           PREPARE_SAMPLES_AND_BATCHES
+              ↓
+           MERGE_SAMPLES_TO_BATCH
+              ↓
+           FORMAT_CHECK_AND_FIX (hg19 or hg38)
+              ↓
+           LIFTOVER_HG19_TO_HG38 (if hg19)
+              ↓
+           UNION_MERGE_BATCHES_TO_PLATFORM
+              ↓
+           TOPMED_STRAND_CHECK / ANVIL_VALIDATION
+              ↓
+           LIGHT_QC_BEFORE_IMPUTATION
+              ↓
+           CREATE_SERVICE_SPECIFIC_VCFS
+```
+
+### How file_structure Affects Processing:
+
+**Inside DISCOVER_AND_LOAD_SAMPLES process:**
+```bash
+if [[ "${file_structure}" == "individual_samples" ]]; then
+    # Find all *.bed files in directory
+    find ${input_path} -name "*.bed" -type f | sed 's/.bed$//' > file_list.txt
+
+elif [[ "${file_structure}" == "individual_chr_split" ]]; then
+    # Find chr-split files and extract unique sample IDs
+    find ${input_path} -name "*_chr*.bed" -type f | \
+        sed 's/_chr[0-9]*.bed$//' | sort -u > file_list.txt
+
+elif [[ "${file_structure}" == "merged_batch" ]]; then
+    # Single merged file - use directly
+    echo "${input_path}" > file_list.txt
+
+elif [[ "${file_structure}" == "merged_chr_split" ]]; then
+    # Merged but split by chromosome
+    echo "${input_path}" > file_list.txt
+fi
+```
+
+**Inside PREPARE_SAMPLES_AND_BATCHES process:**
+```bash
+if [[ "${file_structure}" == "individual_chr_split" && "${file_type}" == "vcf" ]]; then
+    # Concatenate VCF chromosomes
+    for chr in {1..22}; do
+        if [[ -f "${sample_id}_chr${chr}.vcf.gz" ]]; then
+            echo "${sample_id}_chr${chr}.vcf.gz" >> vcf_list.txt
+        fi
+    done
+    bcftools concat --file-list vcf_list.txt -o ${sample_id}_merged.vcf.gz
+
+elif [[ "${file_structure}" == "individual_chr_split" && "${file_type}" == "plink" ]]; then
+    # Merge PLINK chromosomes
+    for chr in {1..22}; do
+        if [[ -f "${sample_id}_chr${chr}.bed" ]]; then
+            echo "${sample_id}_chr${chr}" >> merge_list.txt
+        fi
+    done
+    plink --merge-list merge_list.txt --make-bed --out ${sample_id}
+
+else
+    # Files already in correct format - no concatenation needed
+fi
+```
+
+### Processing Differences by file_structure:
+
+| file_structure | Discovery | Sample Prep | Batch Merge |
+|----------------|-----------|-------------|-------------|
+| `individual_samples` | Find all *.bed | Format conversion only | UNION merge N samples |
+| `individual_chr_split` | Find *_chr*.bed, group | Concatenate chr1-22 | UNION merge N samples |
+| `merged_batch` | Use input_path | None needed | Already merged (skip) |
+| `merged_chr_split` | Use input_path | Concatenate chr1-22 | Already merged (skip) |
+
+### What Stays the Same:
+
+**Regardless of file_structure**, all batches proceed through:
+
+1. **Reference Alignment** - bcftools +fixref to proper reference
+2. **Liftover** - hg19 → hg38 using CrossMap (if needed)
+3. **Platform Merging** - UNION merge of all batches to platform level
+4. **Strand Validation** - TOPMed and AnVIL separate checks
+5. **Light QC** - First time QC filters applied
+6. **VCF Creation** - Service-specific VCFs by chromosome
+
+  
+
+### Visual Flow:
+
+```
+Different Inputs → Converge to Same Format → Same Processing → Same Outputs
+
+individual_samples ────┐
+                       │
+individual_chr_split ──┼─→ Batch (PLINK) ─→ hg38 aligned ─→ Platform ─→ QC ─→ VCFs
+                       │
+merged_batch ──────────┤
+                       │
+merged_chr_split ──────┘
+
+ALL PATHS CONVERGE
 ```
 
 ---
@@ -412,17 +410,37 @@ Q1: Is data already merged at batch level?
 
 ---
 
+## Validation
+
+Before running the pipeline, validate your sample sheet using the provided validation script:
+
+```bash
+bash scripts/validate_samplesheet.sh my_samples.csv
+```
+
+The validation script checks:
+ + CSV format is correct
+ + All required columns present
+ + Valid values for file_type, build, file_structure
+ + Input paths exist
+ + Files can be found in specified directories
+ + File counts and structure match expectations
+
+Prior running nextflow pipeline you can use the available bash helper script to double-check input file format and structure.
+
+---
+
 ## Troubleshooting
 
 ### Issue: "No samples found"
 **Check**: 
 - Is `input_path` correct?
 - Does `file_structure` match your data?
-- Run validation script
+- Run validation script to verify
 
 ### Issue: "Duplicate sample IDs"
 **Solution**: 
-- If legitimate duplicates: Set `--allow_duplicate_samples true`
+- If legitimate duplicates: Contact pipeline maintainer
 - If error: Check file naming patterns
 
 ### Issue: "Mixed chromosome counts"
@@ -432,7 +450,13 @@ Q1: Is data already merged at batch level?
 ### Issue: "Files in both PLINK and VCF format"
 **Solution**: 
 - Create separate rows in sample sheet
-- One row per format type
+- One row per format type per batch
+
+### Issue: "Liftover success rate low (<95%)"
+**Check**:
+- Is `build` correctly specified (hg19 vs hg38)?
+- Are reference files correct version?
+- Review unlifted variants in liftover logs
 
 ---
 
@@ -446,7 +470,7 @@ Special,batch1,/data/special,plink,hg19,individual_samples,*_filtered_v2_QC.bed
 Special,batch2,/data/special,plink,hg19,individual_chr_split,*_chr*_final.bed
 ```
 
-Or use regex patterns:
+Or use regex patterns (if implemented):
 ```csv
 platform_id,batch_id,input_path,file_type,build,file_structure,file_regex
 Complex,batch1,/data,plink,hg19,individual_samples,^[A-Z0-9]+_sample_[0-9]+\.bed$
@@ -457,25 +481,14 @@ Complex,batch1,/data,plink,hg19,individual_samples,^[A-Z0-9]+_sample_[0-9]+\.bed
 ## Summary
 
 ### Supported Input Types:
-✅ Individual samples, all chromosomes together  
-✅ Individual samples, split by chromosome  
-✅ Pre-merged batches  
-✅ Pre-merged batches, split by chromosome  
-✅ PLINK format (.bed/.bim/.fam)  
-✅ VCF format (.vcf.gz)  
-✅ Mixed formats within study  
-✅ Mixed genome builds within platform  
-✅ Custom file naming patterns  
-
-### Key Points:
-1. **Flexibility** - Pipeline adapts to your data structure
-2. **Per-batch specification** - Each batch can be different
-3. **Automatic detection** - Smart file discovery
-4. **Validation** - Check your setup before running
-5. **Parallelization** - Optimized for each structure type
++ Individual samples, all chromosomes together  
++ Individual samples, split by chromosome  
++ Pre-merged batches  
++ Pre-merged batches, split by chromosome  
++ PLINK format (.bed/.bim/.fam)  
++ VCF format (.vcf.gz)  
++ Mixed formats within study  
++ Mixed genome builds within platform  
++ Custom file naming patterns  
 
 ---
-
-**Version**: 2.0 - Multi-structure support  
-**Updated**: November 6, 2024  
-**Status**: Production-ready
