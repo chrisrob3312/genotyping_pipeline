@@ -25,10 +25,6 @@
  * - Monitors both services every 45 minutes
  * - Downloads + decrypts automatically when ready
  * - Returns imputed VCFs for Module 3
- * 
- * WHY THIS IS CRITICAL:
- * - No pipeline restart needed
- * - No email password retrieval
  * - Handles TOPMed's 3-job limit automatically
  * - Runs continuously until completion
  * - Pre-built containers = consistent environment
@@ -123,10 +119,10 @@ process groupChromosomesByPlatform {
 /*
  * WHAT IT DOES: Submits to TOPMed with automatic download & decryption
  * 
- * WHY THIS IS CRITICAL:
+ * 
  * - imputationbot CLI handles everything automatically
  * - --autoDownload waits + downloads when ready
- * - --password enables auto-decryption (no email!)
+ * - --password enables auto-decryption (no email!) --> use this flag to set your own password and include in nextflow.config as parameter
  * - maxForks 3 respects TOPMed's concurrent job limit
  * 
  * CONTAINER: python_tools.sif (includes imputationbot pre-installed)
@@ -294,7 +290,7 @@ process submitToTOPMed {
  * WHAT IT DOES: Submits imputation job to All of Us service
  * 
  * WHY THIS IS CRITICAL:
- * - Different reference panel (AllofUs + 1000G + AnVIL)
+ * - Different reference panel (AllofUs)
  * - Enables benchmarking: TOPMed vs All of Us imputation quality
  * - Returns job ID for monitoring in next process
  * 
