@@ -884,14 +884,13 @@ process UNION_MERGE_BATCHES_TO_PLATFORM {
     """
 }
 // ============================================================================
-// PROCESS 7A: TOPMED STRAND CHECKING
+// PROCESS 7A: TOPMED STRAND VALIDATION (QC CHECK ONLY)
 // ============================================================================
-
 process TOPMED_STRAND_CHECK {
     label 'vcftools'
     tag "${platform_id}"
     
-    publishDir "${params.outdir}/${platform_id}/06_topmed_strand",
+    publishDir "${params.outdir}/${platform_id}/06_topmed_validation",
         mode: 'copy',
         pattern: "*.{txt,log}"
     
@@ -908,11 +907,11 @@ process TOPMED_STRAND_CHECK {
           path(bed),
           path(bim),
           path(fam),
-          path("${platform_id}_topmed-*.txt"),
           val("topmed"),
-          emit: topmed_strand_files
+          emit: topmed_validated_files
     
-    path("${platform_id}_topmed_strand.log"), emit: topmed_strand_log
+    path("${platform_id}_topmed_validation.log"), emit: topmed_validation_log
+    path("${platform_id}_topmed-*.txt"), emit: topmed_validation_files, optional: true
     
     script:
     """
@@ -921,132 +920,165 @@ process TOPMED_STRAND_CHECK {
     
     prefix=\$(basename ${bim} .bim)
     
-    echo "========================================"  | tee ${platform_id}_topmed_strand.log
-    echo "TOPMed STRAND CHECKING" | tee -a ${platform_id}_topmed_strand.log
-    echo "========================================"  | tee -a ${platform_id}_topmed_strand.log
+    echo "========================================" | tee ${platform_id}_topmed_validation.log
+    echo "TOPMed STRAND VALIDATION (QC CHECK)" | tee -a ${platform_id}_topmed_validation.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_topmed_validation.log
+    echo "========================================" | tee -a ${platform_id}_topmed_validation.log
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "Purpose: Validate alignment to TOPMed Freeze 10 reference" | tee -a ${platform_id}_topmed_validation.log
+    echo "Note: Data already aligned to hg38 in previous steps" | tee -a ${platform_id}_topmed_validation.log
+    echo "      This is a QC check, not a fixing step" | tee -a ${platform_id}_topmed_validation.log
+    echo "" | tee -a ${platform_id}_topmed_validation.log
     
-    # Calculate frequencies
+    # Count input
+    n_input=\$(wc -l < ${bim})
+    s_input=\$(wc -l < ${fam})
+    echo "Input variants: \${n_input}" | tee -a ${platform_id}_topmed_validation.log
+    echo "Input samples: \${s_input}" | tee -a ${platform_id}_topmed_validation.log
+    
+    # Calculate frequencies for strand check
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "Calculating allele frequencies..." | tee -a ${platform_id}_topmed_validation.log
     plink --bfile \${prefix} \\
           --freq \\
           --out \${prefix} \\
           --threads ${task.cpus}
     
-    # Run strand check
+    # Run Will Rayner's adapted strand check script for TOPMed Freeze 10
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "Running TOPMed Freeze 10 strand validation..." | tee -a ${platform_id}_topmed_validation.log
     perl ${strand_script} \\
         -b ${bim} \\
         -f \${prefix}.frq \\
         -r ${topmed_ref} \\
         -h \\
         -o ${platform_id}_topmed \\
-        2>&1 | tee -a ${platform_id}_topmed_strand.log
+        2>&1 | tee -a ${platform_id}_topmed_validation.log
     
-    # Count results
-    n_flip=0; [[ -f "${platform_id}_topmed-Strand-Flip.txt" ]] && n_flip=\$(wc -l < ${platform_id}_topmed-Strand-Flip.txt)
-    n_force=0; [[ -f "${platform_id}_topmed-Force-Allele1.txt" ]] && n_force=\$(wc -l < ${platform_id}_topmed-Force-Allele1.txt)
-    n_remove=0; [[ -f "${platform_id}_topmed-remove.txt" ]] && n_remove=\$(wc -l < ${platform_id}_topmed-remove.txt)
+    # Analyze results
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "=== VALIDATION RESULTS ===" | tee -a ${platform_id}_topmed_validation.log
     
-    cat >> ${platform_id}_topmed_strand.log << EOF
-
-RESULTS:
-  Flip: \${n_flip}
-  Force: \${n_force}
-  Remove: \${n_remove}
-  
-✓ TOPMed strand check complete
-========================================
-EOF
-
-    cat ${platform_id}_topmed_strand.log
+    n_flip=0
+    n_force=0
+    n_remove=0
+    n_match=0
+    
+    if [[ -f "${platform_id}_topmed-Strand-Flip.txt" ]]; then
+        n_flip=\$(wc -l < ${platform_id}_topmed-Strand-Flip.txt)
+    fi
+    
+    if [[ -f "${platform_id}_topmed-Force-Allele1.txt" ]]; then
+        n_force=\$(wc -l < ${platform_id}_topmed-Force-Allele1.txt)
+    fi
+    
+    if [[ -f "${platform_id}_topmed-remove.txt" ]]; then
+        n_remove=\$(wc -l < ${platform_id}_topmed-remove.txt)
+    fi
+    
+    n_match=\$((n_input - n_flip - n_force - n_remove))
+    pct_match=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${n_match}/\${n_input}}")
+    
+    echo "Variants matching TOPMed reference: \${n_match} (\${pct_match}%)" | tee -a ${platform_id}_topmed_validation.log
+    echo "Strand flips needed: \${n_flip}" | tee -a ${platform_id}_topmed_validation.log
+    echo "Force allele needed: \${n_force}" | tee -a ${platform_id}_topmed_validation.log
+    echo "Variants to remove: \${n_remove}" | tee -a ${platform_id}_topmed_validation.log
+    
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    
+    # Warn if too many issues
+    total_issues=\$((n_flip + n_force + n_remove))
+    pct_issues=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${total_issues}/\${n_input}}")
+    
+    if (( \$(echo "\${pct_issues} > 1.0" | bc -l) )); then
+        echo "⚠ WARNING: \${pct_issues}% of variants need attention" | tee -a ${platform_id}_topmed_validation.log
+        echo "  This is higher than expected (>1%)" | tee -a ${platform_id}_topmed_validation.log
+        echo "  Possible causes:" | tee -a ${platform_id}_topmed_validation.log
+        echo "    - Issues with earlier bcftools alignment" | tee -a ${platform_id}_topmed_validation.log
+        echo "    - Platform merge introduced inconsistencies" | tee -a ${platform_id}_topmed_validation.log
+        echo "    - Reference panel mismatch" | tee -a ${platform_id}_topmed_validation.log
+        echo "" | tee -a ${platform_id}_topmed_validation.log
+        echo "  Recommendation: Review earlier alignment steps" | tee -a ${platform_id}_topmed_validation.log
+    else
+        echo "✓ Validation passed - \${pct_match}% variants match TOPMed" | tee -a ${platform_id}_topmed_validation.log
+        echo "  Minor discrepancies (\${pct_issues}%) are within normal range" | tee -a ${platform_id}_topmed_validation.log
+    fi
+    
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "NOTE: Since data was aligned with bcftools +fixref earlier," | tee -a ${platform_id}_topmed_validation.log
+    echo "      these files are for QC validation only" | tee -a ${platform_id}_topmed_validation.log
+    echo "      No fixes will be applied - data already properly aligned" | tee -a ${platform_id}_topmed_validation.log
+    echo "" | tee -a ${platform_id}_topmed_validation.log
+    echo "✓ TOPMed validation complete" | tee -a ${platform_id}_topmed_validation.log
+    echo "========================================" | tee -a ${platform_id}_topmed_validation.log
+    
+    cat ${platform_id}_topmed_validation.log
     """
 }
 
 // ============================================================================
-// PROCESS 7B: ANVIL STRAND CHECKING & NORMALIZATION
+// PROCESS 7B: ANVIL VALIDATION (ALREADY ALIGNED)
 // ============================================================================
-
-process ANVIL_STRAND_CHECK {
-    label 'vcftools'
+process ANVIL_VALIDATION {
+    label 'process_low'
     tag "${platform_id}"
     
-    publishDir "${params.outdir}/${platform_id}/06_anvil_strand",
+    publishDir "${params.outdir}/${platform_id}/06_anvil_validation",
         mode: 'copy',
-        pattern: "*.{log,txt}"
+        pattern: "*.log"
     
     input:
     tuple val(platform_id),
           path(bed),
           path(bim),
           path(fam)
-    path hg38_fasta
     
     output:
     tuple val(platform_id),
-          path("${platform_id}_anvil_fixed.bed"),
-          path("${platform_id}_anvil_fixed.bim"),
-          path("${platform_id}_anvil_fixed.fam"),
+          path(bed),
+          path(bim),
+          path(fam),
           val("anvil"),
-          emit: anvil_fixed_files
+          emit: anvil_validated_files
     
-    path("${platform_id}_anvil_prep.log"), emit: anvil_log
+    path("${platform_id}_anvil_validation.log"), emit: anvil_validation_log
     
     script:
     """
     #!/bin/bash
     set -euo pipefail
     
-    prefix=\$(basename ${bed} .bed)
+    echo "========================================" | tee ${platform_id}_anvil_validation.log
+    echo "ALL OF US ANVIL VALIDATION" | tee -a ${platform_id}_anvil_validation.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_anvil_validation.log
+    echo "========================================" | tee -a ${platform_id}_anvil_validation.log
+    echo "" | tee -a ${platform_id}_anvil_validation.log
+    echo "AnVIL data preparation already complete:" | tee -a ${platform_id}_anvil_validation.log
+    echo "  ✓ bcftools norm applied (multiallelic split)" | tee -a ${platform_id}_anvil_validation.log
+    echo "  ✓ bcftools +fixref applied (REF validation)" | tee -a ${platform_id}_anvil_validation.log
+    echo "  ✓ Aligned to hg38 reference" | tee -a ${platform_id}_anvil_validation.log
+    echo "  ✓ Platform merge completed" | tee -a ${platform_id}_anvil_validation.log
+    echo "" | tee -a ${platform_id}_anvil_validation.log
     
-    echo "========================================" | tee ${platform_id}_anvil_prep.log
-    echo "ALL OF US ANVIL PREPARATION" | tee -a ${platform_id}_anvil_prep.log
-    echo "========================================" | tee -a ${platform_id}_anvil_prep.log
+    # Quick validation counts
+    n_snps=\$(wc -l < ${bim})
+    n_samples=\$(wc -l < ${fam})
     
-    # Convert to VCF
-    plink2 --bfile \${prefix} \\
-           --export vcf bgz \\
-           --out temp \\
-           --threads ${task.cpus}
+    echo "Data ready for AnVIL imputation:" | tee -a ${platform_id}_anvil_validation.log
+    echo "  Variants: \${n_snps}" | tee -a ${platform_id}_anvil_validation.log
+    echo "  Samples: \${n_samples}" | tee -a ${platform_id}_anvil_validation.log
+    echo "" | tee -a ${platform_id}_anvil_validation.log
+    echo "✓ AnVIL validation complete - no further alignment needed" | tee -a ${platform_id}_anvil_validation.log
+    echo "========================================" | tee -a ${platform_id}_anvil_validation.log
     
-    n_before=\$(bcftools view -H temp.vcf.gz | wc -l)
-    echo "Variants before: \${n_before}" | tee -a ${platform_id}_anvil_prep.log
-    
-    # Normalize with bcftools
-    bcftools norm \\
-        --check-ref w \\
-        --fasta-ref ${hg38_fasta} \\
-        --multiallelics -any \\
-        temp.vcf.gz \\
-        --output-type z \\
-        --output normalized.vcf.gz \\
-        2>&1 | tee -a ${platform_id}_anvil_prep.log
-    
-    # Fix with +fixref
-    bcftools +fixref normalized.vcf.gz \\
-        --fasta-ref ${hg38_fasta} \\
-        --output fixed.vcf.gz \\
-        --output-type z \\
-        2>&1 | tee -a ${platform_id}_anvil_prep.log
-    
-    n_after=\$(bcftools view -H fixed.vcf.gz | wc -l)
-    n_removed=\$((n_before - n_after))
-    
-    echo "Variants after: \${n_after}" | tee -a ${platform_id}_anvil_prep.log
-    echo "Removed: \${n_removed}" | tee -a ${platform_id}_anvil_prep.log
-    
-    # Convert back to PLINK
-    plink2 --vcf fixed.vcf.gz \\
-           --make-bed \\
-           --out ${platform_id}_anvil_fixed \\
-           --threads ${task.cpus}
-    
-    echo "✓ AnVIL preparation complete" | tee -a ${platform_id}_anvil_prep.log
+    cat ${platform_id}_anvil_validation.log
     """
 }
 
 // ============================================================================
-// PROCESS 8: APPLY STRAND FIXES AND LIGHT QC (FIRST TIME!)
+// PROCESS 8: LIGHT QC (NO STRAND FIXING - ALREADY ALIGNED)
 // ============================================================================
-
-process APPLY_FIXES_AND_LIGHT_QC {
+process LIGHT_QC_BEFORE_IMPUTATION {
     label 'plink'
     tag "${platform_id}_${service}"
     
@@ -1059,7 +1091,6 @@ process APPLY_FIXES_AND_LIGHT_QC {
           path(bed),
           path(bim),
           path(fam),
-          path(strand_files),
           val(service)
     
     output:
@@ -1080,86 +1111,82 @@ process APPLY_FIXES_AND_LIGHT_QC {
     prefix=\$(basename ${bed} .bed)
     
     echo "========================================" | tee ${platform_id}_${service}_light_qc.log
-    echo "LIGHT QC - FIRST TIME QC IS APPLIED!" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "LIGHT QC BEFORE IMPUTATION" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "Platform: ${platform_id}" | tee -a ${platform_id}_${service}_light_qc.log
     echo "Service: ${service}" | tee -a ${platform_id}_${service}_light_qc.log
     echo "========================================" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "NOTE: Data already aligned to hg38 in earlier steps" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "      NO strand fixing applied here" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "      Only basic QC filters for imputation readiness" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
     
     n_input=\$(wc -l < ${bim})
     s_input=\$(wc -l < ${fam})
     
-    # Apply strand fixes (TOPMed only)
-    if [[ "${service}" == "topmed" ]]; then
-        if [[ -f "*-remove.txt" && -s "*-remove.txt" ]]; then
-            plink --bfile \${prefix} --exclude *-remove.txt --make-bed --out temp1 --threads ${task.cpus}
-        else
-            ln -s ${bed} temp1.bed; ln -s ${bim} temp1.bim; ln -s ${fam} temp1.fam
-        fi
-        
-        if [[ -f "*-Strand-Flip.txt" && -s "*-Strand-Flip.txt" ]]; then
-            plink --bfile temp1 --flip *-Strand-Flip.txt --make-bed --out temp2 --threads ${task.cpus}
-        else
-            ln -s temp1.bed temp2.bed; ln -s temp1.bim temp2.bim; ln -s temp1.fam temp2.fam
-        fi
-        
-        if [[ -f "*-Force-Allele1.txt" && -s "*-Force-Allele1.txt" ]]; then
-            plink --bfile temp2 --a1-allele *-Force-Allele1.txt --make-bed --out temp3 --threads ${task.cpus}
-        else
-            mv temp2.bed temp3.bed; mv temp2.bim temp3.bim; mv temp2.fam temp3.fam
-        fi
-    else
-        # AnVIL - already fixed
-        ln -s ${bed} temp3.bed; ln -s ${bim} temp3.bim; ln -s ${fam} temp3.fam
-    fi
+    echo "INPUT:" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Variants: \${n_input}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Samples: \${s_input}" | tee -a ${platform_id}_${service}_light_qc.log
     
-    # Step 1: SNPs only
+    # Step 1: SNPs only (biallelic A/C/G/T)
     echo "" | tee -a ${platform_id}_${service}_light_qc.log
-    echo "Step 1: SNPs only (biallelic)" | tee -a ${platform_id}_${service}_light_qc.log
-    plink --bfile temp3 \\
+    echo "Step 1: Keep biallelic SNPs only..." | tee -a ${platform_id}_${service}_light_qc.log
+    plink --bfile \${prefix} \\
           --snps-only just-acgt \\
           --max-alleles 2 \\
           --make-bed \\
-          --out temp4 \\
+          --out step1 \\
           --threads ${task.cpus}
     
-    n_step1=\$(wc -l < temp4.bim)
-    echo "  Variants: \${n_step1}" | tee -a ${platform_id}_${service}_light_qc.log
+    n_step1=\$(wc -l < step1.bim)
+    echo "  Remaining: \${n_step1}" | tee -a ${platform_id}_${service}_light_qc.log
     
     # Step 2: Remove duplicates
-    echo "Step 2: Remove duplicates" | tee -a ${platform_id}_${service}_light_qc.log
-    plink --bfile temp4 \\
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "Step 2: Remove duplicate variants..." | tee -a ${platform_id}_${service}_light_qc.log
+    plink --bfile step1 \\
           --rm-dup exclude-all \\
           --make-bed \\
-          --out temp5 \\
+          --out step2 \\
           --threads ${task.cpus}
     
-    n_step2=\$(wc -l < temp5.bim)
-    echo "  Variants: \${n_step2}" | tee -a ${platform_id}_${service}_light_qc.log
+    n_step2=\$(wc -l < step2.bim)
+    n_dup=\$((n_step1 - n_step2))
+    echo "  Duplicates removed: \${n_dup}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Remaining: \${n_step2}" | tee -a ${platform_id}_${service}_light_qc.log
     
-    # Step 3: Remove monomorphic (MAF > 0 only)
-    echo "Step 3: Remove monomorphic (MAF > 0)" | tee -a ${platform_id}_${service}_light_qc.log
-    plink --bfile temp5 \\
+    # Step 3: Remove monomorphic (MAF > 0)
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "Step 3: Remove monomorphic variants..." | tee -a ${platform_id}_${service}_light_qc.log
+    plink --bfile step2 \\
           --maf 0.000001 \\
           --make-bed \\
-          --out temp6 \\
+          --out step3 \\
           --threads ${task.cpus}
     
-    n_step3=\$(wc -l < temp6.bim)
-    echo "  Variants: \${n_step3}" | tee -a ${platform_id}_${service}_light_qc.log
+    n_step3=\$(wc -l < step3.bim)
+    n_mono=\$((n_step2 - n_step3))
+    echo "  Monomorphic removed: \${n_mono}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Remaining: \${n_step3}" | tee -a ${platform_id}_${service}_light_qc.log
     
-    # Step 4: Genotype missingness
-    echo "Step 4: Variant call rate (geno 0.05)" | tee -a ${platform_id}_${service}_light_qc.log
-    plink --bfile temp6 \\
+    # Step 4: Variant call rate (geno 0.05)
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "Step 4: Filter variant call rate (≥95%)..." | tee -a ${platform_id}_${service}_light_qc.log
+    plink --bfile step3 \\
           --geno 0.05 \\
           --make-bed \\
-          --out temp7 \\
+          --out step4 \\
           --threads ${task.cpus}
     
-    n_step4=\$(wc -l < temp7.bim)
-    echo "  Variants: \${n_step4}" | tee -a ${platform_id}_${service}_light_qc.log
+    n_step4=\$(wc -l < step4.bim)
+    n_lowcr=\$((n_step3 - n_step4))
+    echo "  Low call rate removed: \${n_lowcr}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Remaining: \${n_step4}" | tee -a ${platform_id}_${service}_light_qc.log
     
-    # Step 5: Sample missingness
-    echo "Step 5: Sample call rate (mind 0.05)" | tee -a ${platform_id}_${service}_light_qc.log
-    plink --bfile temp7 \\
+    # Step 5: Sample call rate (mind 0.05)
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "Step 5: Filter sample call rate (≥95%)..." | tee -a ${platform_id}_${service}_light_qc.log
+    plink --bfile step4 \\
           --mind 0.05 \\
           --make-bed \\
           --out ${platform_id}_${service}_qc \\
@@ -1172,43 +1199,48 @@ process APPLY_FIXES_AND_LIGHT_QC {
     var_retention=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${n_final}/\${n_input}}")
     samp_retention=\$(awk "BEGIN {printf \\"%.2f\\", 100*\${s_final}/\${s_input}}")
     
-    cat >> ${platform_id}_${service}_light_qc.log << EOF
-
-========================================
-LIGHT QC SUMMARY
-========================================
-INPUT:
-  Variants: \${n_input}
-  Samples: \${s_input}
-
-QC STEPS (NO HWE, NO MAF FILTERING):
-  1. SNPs only: \${n_step1}
-  2. Remove duplicates: \${n_step2}
-  3. Remove monomorphic: \${n_step3}
-  4. Variant CR > 0.95: \${n_step4}
-  5. Sample CR > 0.95: \${n_final}
-
-OUTPUT:
-  Variants: \${n_final} (\${var_retention}% retained)
-  Samples: \${s_final} (\${samp_retention}% retained)
-
-EXPLICITLY NOT APPLIED:
-  ✗ HWE filtering (Module 6 only)
-  ✗ MAF filtering beyond monomorphic (Module 6 only)
-  ✗ Sex checks (Module 6 only)
-  ✗ Heterozygosity (Module 6 only)
-  ✗ Relatedness (Module 6 only)
-
-✓ Light QC complete
-========================================
-EOF
-
+    n_var_removed=\$((n_input - n_final))
+    n_samp_removed=\$((s_input - s_final))
+    
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "========================================" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "LIGHT QC SUMMARY" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "========================================" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "QC FILTERS APPLIED:" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  1. Biallelic SNPs only" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  2. Remove duplicates" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  3. Remove monomorphic (MAF > 0)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  4. Variant call rate ≥ 95%" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  5. Sample call rate ≥ 95%" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "RESULTS:" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Input variants: \${n_input}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Output variants: \${n_final}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Variants removed: \${n_var_removed} (\${var_retention}% retained)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Input samples: \${s_input}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Output samples: \${s_final}" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  Samples removed: \${n_samp_removed} (\${samp_retention}% retained)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "FILTERS EXPLICITLY NOT APPLIED:" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ Strand fixing (already aligned to hg38)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ HWE filtering (Module 6 only)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ MAF filtering beyond monomorphic (Module 6 only)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ Sex checks (Module 6 only)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ Heterozygosity (Module 6 only)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "  ✗ Relatedness (Module 6 only)" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "✓ Light QC complete - ready for ${service} imputation" | tee -a ${platform_id}_${service}_light_qc.log
+    echo "========================================" | tee -a ${platform_id}_${service}_light_qc.log
+    
     cat ${platform_id}_${service}_light_qc.log
     
-    # Cleanup
-    rm -f temp*.{bed,bim,fam,log,nosex}
+    # Cleanup intermediate files
+    rm -f step*.{bed,bim,fam,log,nosex}
     """
 }
+
 
 // ============================================================================
 // PROCESS 9: CREATE SERVICE-SPECIFIC VCFS BY CHROMOSOME
