@@ -1,5 +1,0 @@
-platform_id,file_path,file_type,build,collection_batch
-Platform1,/project/arrays/platform1,plink,hg19,batch1
-Platform2,/project/arrays/platform2,plink,hg38,batch1
-Platform3_VCF,/project/vcfs/platform3_all,vcf,hg38,batch2
-Platform4_splitVCF,/project/vcfs/platform4_chr,vcf_split,hg19,batch2
