@@ -877,13 +877,15 @@ process CREATE_TOPMED_VCFS {
           path(fam)
     
     output:
+    // Output tuple matches Module 2 expected format: (platform, chr, vcf, index, build, batch)
     tuple val(platform_id),
-          val("topmed"),
           val(chr),
           path("${platform_id}_topmed_chr${chr}.vcf.gz"),
           path("${platform_id}_topmed_chr${chr}.vcf.gz.csi"),
+          val("hg38"),
+          val("all"),
           emit: topmed_vcfs
-    
+
     path("${platform_id}_topmed_chr${chr}.log"), emit: vcf_log
     
     script:
@@ -947,12 +949,16 @@ process CREATE_ANVIL_VCF {
           path(fam)
     
     output:
+    // Output tuple matches Module 2 expected format: (platform, chr, vcf, index, build, batch)
+    // AnVIL uses single concatenated file for all autosomes (saves API quota)
     tuple val(platform_id),
-          val("anvil"),
+          val("1-22"),
           path("${platform_id}_anvil_all_autosomes.vcf.gz"),
           path("${platform_id}_anvil_all_autosomes.vcf.gz.csi"),
+          val("hg38"),
+          val("all"),
           emit: anvil_vcf
-    
+
     path("${platform_id}_anvil.log"), emit: vcf_log
     
     script:

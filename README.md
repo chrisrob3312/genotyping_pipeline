@@ -186,7 +186,12 @@ nextflow run main.nf \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `admixture_k` | `"5,6,7"` | ADMIXTURE K values |
+| `admixture_k_min` | `5` | Minimum K value for ADMIXTURE |
+| `admixture_k_max` | `7` | Maximum K value for ADMIXTURE |
+| `admixture_cv_folds` | `5` | Cross-validation folds for ADMIXTURE |
+| `n_pcs` | `15` | Number of principal components |
+| `maf_threshold` | `0.01` | MAF threshold for filtering |
+| `primary_ancestry` | `"EUR"` | Primary ancestry for MagicalRsq-X model (EUR, AFR, AMR, EAS) |
 | `run_lai` | `false` | Enable local ancestry inference |
 | `lai_methods` | `"rfmix2"` | LAI methods (rfmix2,rfmix1,flare,gnomix) |
 
