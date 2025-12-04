@@ -22,12 +22,12 @@ nextflow.enable.dsl=2
 // ============================================================================
 
 include { PRE_IMPUTATION_QC } from './modules/Module1_PreImputation'
-include { IMPUTATION } from './modules/Module2_Imputation'
-include { POST_IMPUTATION_QC } from './modules/Module3_PostQC'
-include { PLATFORM_MERGING } from './modules/Module4_Merging'
-include { RE_IMPUTATION } from './modules/Module5_ReImputation'
-include { POST_MERGE_QC } from './modules/Module6_PostMergeQC'
-include { ANCESTRY_ESTIMATION } from './modules/Module7_Ancestry'
+include { MODULE2_IMPUTATION as IMPUTATION } from './modules/Module2_Imputation'
+include { MODULE3_POSTQC as POST_IMPUTATION_QC } from './modules/Module3_PostQC'
+include { MODULE4_MERGING as PLATFORM_MERGING } from './modules/Module4_Merging'
+include { MODULE5_REIMPUTATION as RE_IMPUTATION } from './modules/Module5_ReImputation'
+include { MODULE6_POSTMERGE_QC as POST_MERGE_QC } from './modules/Module6_PostMergeQC'
+include { MODULE7_ANCESTRY as ANCESTRY_ESTIMATION } from './modules/Module7_Ancestry'
 
 // ============================================================================
 // HELP MESSAGE
@@ -43,10 +43,12 @@ def helpMessage() {
     merging, and ancestry estimation across multiple array platforms.
     
     Usage:
-        nextflow run main.nf --sample_sheet samples.tsv [options]
-    
+        nextflow run main.nf --sample_sheet samples.csv [options]
+
     Required Arguments:
-        --sample_sheet PATH       TSV file with columns: platform,bed,bim,fam
+        --sample_sheet PATH       CSV file with columns:
+                                  platform_id,batch_id,input_path,file_type,build,file_structure
+                                  See documentation/input_file_set_up.md for details
     
     Optional Arguments - General:
         --input_build STR         Genome build [default: hg19]
@@ -70,7 +72,8 @@ def helpMessage() {
         --magicalrsq_threshold NUM    MagicalRsq-X R² threshold [default: 0.3]
         --sample_call_rate NUM        Sample call rate [default: 0.95]
         --variant_call_rate NUM       Variant call rate [default: 0.95]
-        --hwe_pvalue NUM              HWE p-value [default: 1e-6]
+        --skip_hwe                    Skip HWE filter [default: true] (for admixed pops)
+        --hwe_pvalue NUM              HWE p-value threshold [default: 1e-6]
         --use_genesis                 Use GENESIS PCRelate [default: true]
     
     Optional Arguments - Module 7:
@@ -203,27 +206,60 @@ Modules enabled:
 // ============================================================================
 
 /*
- * Expected format (TSV):
- * platform	bed	bim	fam
- * platform1	path/to/data1.bed	path/to/data1.bim	path/to/data1.fam
- * platform2	path/to/data2.bed	path/to/data2.bim	path/to/data2.fam
+ * Expected format (CSV):
+ * platform_id,batch_id,input_path,file_type,build,file_structure
+ * GSAv1,batch_2020_01,/data/gsa_v1/batch_2020_01,plink,hg19,individual_samples
+ * GSAv2,batch_2021_03,/data/gsa_v2/batch_2021_03,plink,hg38,merged_batch
+ *
+ * Column definitions:
+ *   platform_id    - Genotyping platform/array (e.g., GSAv1, Omni25, MEGA)
+ *   batch_id       - Batch identifier (e.g., batch_2020_01, cohort_A)
+ *   input_path     - Path to directory OR file prefix
+ *   file_type      - File format: plink or vcf
+ *   build          - Genome build: hg19 or hg38
+ *   file_structure - How files are organized:
+ *                    individual_samples, individual_chr_split,
+ *                    merged_batch, merged_chr_split
+ *
+ * See documentation/input_file_set_up.md for detailed examples
  */
 
 Channel
     .fromPath(params.sample_sheet)
-    .splitCsv(header: true, sep: '\t')
-    .map { row -> 
-        def platform = row.platform
-        def bed = file(row.bed)
-        def bim = file(row.bim)
-        def fam = file(row.fam)
-        
-        // Validate files exist
-        if (!bed.exists()) error "BED file not found: ${bed}"
-        if (!bim.exists()) error "BIM file not found: ${bim}"
-        if (!fam.exists()) error "FAM file not found: ${fam}"
-        
-        return tuple(platform, bed, bim, fam)
+    .splitCsv(header: true)
+    .map { row ->
+        def platform_id = row.platform_id
+        def batch_id = row.batch_id
+        def input_path = row.input_path
+        def file_type = row.file_type
+        def build = row.build
+        def file_structure = row.file_structure
+
+        // Validate required columns
+        if (!platform_id) error "Missing platform_id in sample sheet row"
+        if (!batch_id) error "Missing batch_id in sample sheet row"
+        if (!input_path) error "Missing input_path in sample sheet row"
+        if (!file_type) error "Missing file_type in sample sheet row"
+        if (!build) error "Missing build in sample sheet row"
+        if (!file_structure) error "Missing file_structure in sample sheet row"
+
+        // Validate file_type
+        if (!(file_type in ['plink', 'vcf'])) {
+            error "Invalid file_type '${file_type}' - must be 'plink' or 'vcf'"
+        }
+
+        // Validate build
+        if (!(build in ['hg19', 'hg38'])) {
+            error "Invalid build '${build}' - must be 'hg19' or 'hg38'"
+        }
+
+        // Validate file_structure
+        def valid_structures = ['individual_samples', 'individual_chr_split', 'merged_batch', 'merged_chr_split']
+        if (!(file_structure in valid_structures)) {
+            error "Invalid file_structure '${file_structure}' - must be one of: ${valid_structures.join(', ')}"
+        }
+
+        return tuple(platform_id, batch_id, input_path, file_type, build, file_structure)
     }
     .set { input_plink_ch }
 
@@ -233,170 +269,128 @@ Channel
 
 workflow {
     log.info "Starting pipeline execution..."
-    
+
     // ------------------------------------------------------------------------
     // MODULE 1: Pre-imputation QC and file preparation
     // ------------------------------------------------------------------------
+    // Note: Module 1 reads reference files from params.* internally
     if (!skip_modules.contains(1)) {
         log.info "=== Running Module 1: Pre-Imputation QC ==="
-        
-        PRE_IMPUTATION_QC(
-            input_plink_ch,
-            file(params.reference_fasta),
-            file(params.liftover_chain),
-            file(params.topmed_reference),
-            file(params.strand_check_script)
-        )
-        
-        // Outputs: per-platform VCFs (bgzipped, indexed, by chromosome)
-        module1_vcfs = PRE_IMPUTATION_QC.out.vcf_files
-        module1_manifests = PRE_IMPUTATION_QC.out.manifests
+
+        PRE_IMPUTATION_QC(input_plink_ch)
+
+        // Outputs: per-platform VCFs for TOPMed and AnVIL pathways
+        module1_topmed_vcfs = PRE_IMPUTATION_QC.out.topmed_vcfs
+        module1_anvil_vcf = PRE_IMPUTATION_QC.out.anvil_vcf
     } else {
         error "Cannot skip Module 1 - it's required for all downstream modules"
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 2: Imputation via TOPMed and/or All of Us AnVIL
     // ------------------------------------------------------------------------
+    // Note: Module 2 reads imputation params from params.* internally
     if (!skip_modules.contains(2)) {
         log.info "=== Running Module 2: Imputation ==="
-        
+
         IMPUTATION(
-            module1_vcfs,
-            module1_manifests,
-            params.run_topmed,
-            params.run_anvil,
-            params.topmed_api_token,
-            params.topmed_password,
-            params.anvil_workspace,
-            params.anvil_project
+            module1_topmed_vcfs,
+            module1_anvil_vcf
         )
-        
-        // Outputs: imputed VCFs per platform (bgzipped, indexed, by chromosome)
-        module2_imputed = IMPUTATION.out.imputed_vcfs
+
+        // Outputs: imputed VCFs per platform (with server identifier)
+        module2_imputed = IMPUTATION.out.imputed_data
     } else {
         error "Cannot skip Module 2 - imputation is required"
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 3: Post-imputation QC with MagicalRsq-X
     // ------------------------------------------------------------------------
+    // Note: Module 3 reads QC thresholds from params.* internally
     if (!skip_modules.contains(3)) {
         log.info "=== Running Module 3: Post-Imputation QC ==="
-        
-        POST_IMPUTATION_QC(
-            module2_imputed,
-            file(params.magicalrsq_filter_script),
-            file(params.magicalrsq_models_dir),
-            params.magicalrsq_threshold,
-            params.sample_call_rate,
-            params.variant_call_rate
-        )
-        
-        // Outputs: QC'd VCFs per platform (bgzipped, indexed, by chromosome)
-        module3_qc_data = POST_IMPUTATION_QC.out.qc_vcfs
+
+        POST_IMPUTATION_QC(module2_imputed)
+
+        // Outputs: QC'd VCFs per platform
+        module3_qc_data = POST_IMPUTATION_QC.out.qc_data
     } else {
         log.info "Skipping Module 3 - using Module 2 output directly"
         module3_qc_data = module2_imputed
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 4: Platform merging
     // ------------------------------------------------------------------------
     if (!skip_modules.contains(4)) {
         log.info "=== Running Module 4: Platform Merging ==="
-        
-        // Collect all platforms for merging
-        PLATFORM_MERGING(
-            module3_qc_data.collect()
-        )
-        
-        // Outputs: single merged PLINK file (bed/bim/fam)
-        module4_merged = PLATFORM_MERGING.out.merged_plink
+
+        PLATFORM_MERGING(module3_qc_data)
+
+        // Outputs: merged VCF data
+        module4_merged = PLATFORM_MERGING.out.merged_vcf
     } else {
         error "Cannot skip Module 4 - merging is required for downstream analysis"
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 5: Re-imputation of merged data
     // ------------------------------------------------------------------------
+    // Note: Module 5 reads imputation params from params.* internally
     if (!skip_modules.contains(5)) {
         log.info "=== Running Module 5: Re-Imputation ==="
-        
-        RE_IMPUTATION(
-            module4_merged,
-            params.run_topmed,
-            params.run_anvil,
-            params.topmed_api_token,
-            params.topmed_password,
-            params.anvil_workspace,
-            params.anvil_project
-        )
-        
-        // Outputs: re-imputed VCFs (bgzipped, indexed, by chromosome)
-        module5_reimputed = RE_IMPUTATION.out.reimputed_vcfs
+
+        RE_IMPUTATION(module4_merged)
+
+        // Outputs: re-imputed VCFs
+        module5_reimputed = RE_IMPUTATION.out.reimputed_data
     } else {
         log.info "Skipping Module 5 - using Module 4 merged data for Module 6"
-        // Convert Module 4 PLINK to VCF format for Module 6
         module5_reimputed = module4_merged
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 6: Post-merge QC (2nd pass)
     // ------------------------------------------------------------------------
+    // Note: Module 6 reads QC thresholds from params.* internally
     if (!skip_modules.contains(6)) {
         log.info "=== Running Module 6: Post-Merge QC (Final) ==="
-        
-        POST_MERGE_QC(
-            module5_reimputed,
-            file(params.magicalrsq_filter_script),
-            file(params.magicalrsq_models_dir),
-            params.use_genesis,
-            params.magicalrsq_threshold,
-            params.hwe_pvalue,
-            params.het_sd_threshold,
-            params.kinship_threshold
-        )
-        
-        // Outputs: final analysis-ready datasets (MAF filtered and unfiltered)
-        module6_final_maf = POST_MERGE_QC.out.final_data_maf
-        module6_final_nomaf = POST_MERGE_QC.out.final_data_nomaf
-        module6_pcs = POST_MERGE_QC.out.pca_results
+
+        POST_MERGE_QC(module5_reimputed)
+
+        // Outputs: final analysis-ready datasets (MAF filtered and no MAF filter)
+        module6_final_maf = POST_MERGE_QC.out.final_maf_filtered
+        module6_final_nomaf = POST_MERGE_QC.out.final_no_maf
+        module6_pcs = POST_MERGE_QC.out.pcs
     } else {
         log.info "Skipping Module 6 - using Module 5 output directly"
         module6_final_maf = module5_reimputed
         module6_final_nomaf = module5_reimputed
+        module6_pcs = Channel.empty()
     }
-    
+
     // ------------------------------------------------------------------------
     // MODULE 7: Ancestry estimation
     // ------------------------------------------------------------------------
+    // Note: Module 7 reads ancestry params from params.* internally
+    // Module 7 requires: qc_data, pcs, and imputed_vcf channels
     if (!skip_modules.contains(7)) {
         log.info "=== Running Module 7: Ancestry Estimation ==="
-        
-        // Parse ADMIXTURE K values
-        def k_values = params.admixture_k.split(',').collect { it.toInteger() }
-        
-        // Parse LAI methods
-        def lai_methods = params.lai_methods.split(',')
-        
+
         ANCESTRY_ESTIMATION(
             module6_final_nomaf,
-            file(params.reference_panel),
-            file(params.genetic_map_dir),
-            k_values,
-            params.run_lai,
-            lai_methods
+            module6_pcs,
+            module5_reimputed
         )
-        
+
         // Outputs: ancestry estimation results
-        module7_grafanc = ANCESTRY_ESTIMATION.out.grafanc_results
-        module7_admixture = ANCESTRY_ESTIMATION.out.admixture_results
-        module7_lai = ANCESTRY_ESTIMATION.out.lai_results
+        module7_grafanc = ANCESTRY_ESTIMATION.out.grafanc_ancestry
+        module7_admixture = ANCESTRY_ESTIMATION.out.admixture_summary
     } else {
         log.info "Skipping Module 7 - Ancestry estimation disabled"
     }
-    
+
     log.info "=== Pipeline workflow defined successfully ==="
 }
 

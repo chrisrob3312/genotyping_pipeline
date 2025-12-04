@@ -73,16 +73,31 @@ process PREPARE_FOR_ANCESTRY {
 
 /*
  * Process 2: GRAF-anc Global Ancestry Estimation
- * CORRECTED: Uses grafanc executable with proper 3-digit AncGroupID parsing
+ * Reference: https://github.com/jimmy-penn/grafanc
+ *
+ * GRAF-anc uses genetic distance axes (GD1-GD6) to estimate ancestry.
+ * Outputs 3-digit AncGroupID codes:
+ *   - 1XX = African (101=Nigeria, 102=W.Africa, 107=African American, etc.)
+ *   - 2XX = Middle East/North Africa
+ *   - 3XX = European (301=Finland, 302=N.Europe, 305=NE Europe, etc.)
+ *   - 4XX = South Asian
+ *   - 5XX = East Asian
+ *   - 6XX = American
+ *   - 7XX = Oceania
+ *   - 8XX = Multi-ancestry
+ *
+ * Requirements:
+ *   - htslib must be installed
+ *   - AncSnpPopAFs.txt data file (ancestry SNP population frequencies)
  */
 process GRAFANC_ANCESTRY {
     tag "${sample_id}_${server}"
     label 'process_high'
     publishDir "${params.outdir}/module7/01_grafanc/${server}", mode: 'copy'
-    
+
     input:
     tuple val(sample_id), val(server), path(bed), path(bim), path(fam)
-    
+
     output:
     tuple val(sample_id), val(server),
           path("${sample_id}_${server}_grafanc_results.txt"), emit: ancestry
@@ -90,21 +105,43 @@ process GRAFANC_ANCESTRY {
     path("${sample_id}_${server}_grafanc_summary.txt"), emit: summary
     path("${sample_id}_${server}_grafanc_by_major_group.txt"), emit: major_groups
     path("${sample_id}_${server}_grafanc_by_subgroup.txt"), emit: subgroups
-    
+
     script:
+    // GRAF-anc data directory should contain AncSnpPopAFs.txt
+    def grafanc_data = params.grafanc_data_dir ?: '/opt/grafanc/data'
     """
     #!/usr/bin/env bash
     set -euo pipefail
-    
+
     echo "=== Running GRAF-anc for ${sample_id} (${server}) ==="
-    
-    # Run GRAF-anc executable
-    # grafanc takes: <input PLINK prefix> <output file> [options]
-    grafanc ${sample_id}_${server} \\
-        ${sample_id}_${server}_grafanc_results.txt \\
-        --threads ${task.cpus} \\
-        --maxmem ${task.memory.toMega()}
-    
+    echo "Reference: https://github.com/jimmy-penn/grafanc"
+
+    # Verify GRAF-anc data file exists
+    if [ ! -f "${grafanc_data}/AncSnpPopAFs.txt" ]; then
+        echo "ERROR: AncSnpPopAFs.txt not found in ${grafanc_data}"
+        echo "Download from: https://github.com/jimmy-penn/grafanc"
+        exit 1
+    fi
+
+    # GRAF-anc command syntax (from GitHub):
+    # ./grafanc <input_file> [options]
+    #   -d <data_dir>  : Directory containing AncSnpPopAFs.txt
+    #   -o <output>    : Output file prefix
+    #
+    # Input can be:
+    #   - PLINK .bed/.bim/.fam (provide prefix without extension)
+    #   - VCF/BCF file
+    grafanc \\
+        ${bed.baseName} \\
+        -d ${grafanc_data} \\
+        -o ${sample_id}_${server}_grafanc_results \\
+        2>&1 | tee ${sample_id}_${server}_grafanc.log
+
+    # Rename output to expected filename
+    if [ -f "${sample_id}_${server}_grafanc_results.anc" ]; then
+        mv ${sample_id}_${server}_grafanc_results.anc ${sample_id}_${server}_grafanc_results.txt
+    fi
+
     echo "=== GRAF-anc complete, creating summaries and plots ==="
     
     # Create comprehensive summary and visualizations in R
@@ -820,21 +857,25 @@ process PREPARE_FOR_LAI {
 
 /*
  * Process 6: RFMix v2 Local Ancestry Inference (DEFAULT - OPTIONAL)
+ * Reference: https://github.com/slowkoni/rfmix
+ *
+ * RFMix v2 uses phased VCF input and sample map for reference populations.
+ * Output: .msp.tsv (most likely ancestry per segment), .Q (global ancestry)
  */
 process RFMIX_V2 {
     tag "${sample_id}_${server}_chr${chr}"
     label 'process_high'
     publishDir "${params.outdir}/module7/03_local_ancestry/rfmix_v2/${server}", mode: 'copy'
-    
+
     input:
     tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
     path(reference_vcf)
     path(reference_sample_map)
     path(genetic_map)
-    
+
     when:
-    params.lai_tool == 'rfmix_v2' || params.lai_tool == 'all'
-    
+    params.run_lai && params.lai_methods.contains('rfmix2')
+
     output:
     tuple val(sample_id), val(server), val(chr),
           path("${sample_id}_${server}_chr${chr}.rfmix.Q"),
@@ -859,6 +900,256 @@ process RFMIX_V2 {
         2>&1 | tee ${sample_id}_${server}_chr${chr}.rfmix.log
     
     echo "=== RFMix v2 complete for chr${chr} ==="
+    """
+}
+
+/*
+ * Process 6B: FLARE Local Ancestry Inference (OPTIONAL)
+ * Fast HMM-based method from Browning Lab
+ * Reference: https://github.com/browning-lab/flare
+ */
+process FLARE_LAI {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/flare/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(reference_vcf)
+    path(reference_panel)
+    path(genetic_map)
+
+    when:
+    params.run_lai && params.lai_methods.contains('flare')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("${sample_id}_${server}_chr${chr}.anc.vcf.gz"),
+          path("${sample_id}_${server}_chr${chr}.global.anc.gz"), emit: results
+    path("${sample_id}_${server}_chr${chr}.flare.log"), emit: log
+    path("${sample_id}_${server}_chr${chr}.model"), emit: model optional true
+
+    script:
+    def mem_gb = task.memory ? task.memory.toGiga() : 16
+    """
+    echo "=== Running FLARE for chr${chr} (${server}) ==="
+
+    # FLARE command (https://github.com/browning-lab/flare)
+    # Usage: java -jar flare.jar ref=<VCF> ref-panel=<panel_file> gt=<VCF> map=<genetic_map> out=<prefix>
+    # ref-panel: Two-column file mapping sample IDs to population labels
+    java -Xmx${mem_gb}g -jar \${FLARE_JAR:-/opt/flare/flare.jar} \\
+        ref=${reference_vcf} \\
+        ref-panel=${reference_panel} \\
+        gt=${vcf} \\
+        map=${genetic_map} \\
+        out=${sample_id}_${server}_chr${chr} \\
+        nthreads=${task.cpus} \\
+        em=true \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.flare.log
+
+    echo "=== FLARE complete for chr${chr} ==="
+    """
+}
+
+/*
+ * Process 6C: G-NOMIX Local Ancestry Inference (OPTIONAL)
+ * Neural network-based method - fastest option
+ * Reference: https://github.com/AI-sandbox/gnomix
+ */
+process GNOMIX_LAI {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/gnomix/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(model_file)  // Pre-trained model OR reference files for training
+    path(genetic_map)
+
+    when:
+    params.run_lai && params.lai_methods.contains('gnomix')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("output/${sample_id}_${server}_chr${chr}.msp.tsv"),
+          path("output/${sample_id}_${server}_chr${chr}.fb.tsv"), emit: results
+    path("output/*.png"), emit: plots optional true
+    path("${sample_id}_${server}_chr${chr}.gnomix.log"), emit: log
+
+    script:
+    """
+    echo "=== Running G-NOMIX for chr${chr} (${server}) ==="
+
+    mkdir -p output
+
+    # G-NOMIX command (https://github.com/AI-sandbox/gnomix)
+    # Usage with pre-trained model:
+    #   python3 gnomix.py <query_file> <output_folder> <chr_nr> <phase> <model_path>
+    # Usage for training new model:
+    #   python3 gnomix.py <query_file> <genetic_map> <output_folder> <chr_nr> <phase> \\
+    #                     <reference_file> <sample_map>
+    python3 \${GNOMIX_PATH:-/opt/gnomix}/gnomix.py \\
+        ${vcf} \\
+        output/ \\
+        ${chr} \\
+        False \\
+        ${model_file} \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.gnomix.log
+
+    # Rename outputs with sample/server prefix
+    for f in output/*.msp.tsv; do
+        if [ -f "\$f" ]; then
+            mv "\$f" "output/${sample_id}_${server}_chr${chr}.msp.tsv"
+        fi
+    done
+
+    for f in output/*.fb.tsv; do
+        if [ -f "\$f" ]; then
+            mv "\$f" "output/${sample_id}_${server}_chr${chr}.fb.tsv"
+        fi
+    done
+
+    echo "=== G-NOMIX complete for chr${chr} ==="
+    """
+}
+
+/*
+ * Process 6D: RFMix v1 Local Ancestry Inference (OPTIONAL - Legacy)
+ * Original RFMix implementation with PopPhased
+ * Note: Requires different input format (binary alleles)
+ * Reference: https://sites.google.com/site/rfmixlocalancestryinference/
+ * See also: https://github.com/armartin/ancestry_pipeline for usage example
+ *
+ * Input file formats (from armartin/ancestry_pipeline):
+ *   - .alleles: Space-separated binary alleles (0/1) for each haplotype
+ *   - .classes: Population labels for each haplotype (e.g., "AFR EUR EAS")
+ *   - .snp_locations: Genetic positions in cM for each marker
+ */
+process RFMIX_V1 {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/rfmix_v1/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(reference_alleles)   // Binary alleles file (.alleles format)
+    path(reference_classes)   // Population labels (.classes format)
+    path(marker_locations)    // SNP positions in genetic distance (.snp_locations format)
+
+    when:
+    params.run_lai && params.lai_methods.contains('rfmix1')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("${sample_id}_${server}_chr${chr}.0.Viterbi.txt"),
+          path("${sample_id}_${server}_chr${chr}.allelesRephased0.txt"), emit: results
+    path("${sample_id}_${server}_chr${chr}.rfmix1.log"), emit: log
+    path("${sample_id}_${server}_chr${chr}_query.alleles"), emit: query_alleles
+
+    script:
+    """
+    echo "=== Running RFMix v1 for chr${chr} (${server}) ==="
+    echo "Reference: https://github.com/armartin/ancestry_pipeline"
+
+    # Convert VCF to RFMix v1 binary alleles format
+    # Format: Each row is a variant, each column pair is a sample's two haplotypes
+    # Values: 0 (ref), 1 (alt), 9 (missing)
+    echo "Step 1: Converting VCF to binary alleles format..."
+
+    python3 <<'PYSCRIPT'
+import gzip
+
+vcf_file = "${vcf}"
+output_alleles = "${sample_id}_${server}_chr${chr}_query.alleles"
+
+# Read VCF and convert to binary alleles (transposed format for RFMix v1)
+# RFMix v1 expects: rows = haplotypes, columns = SNPs
+haplotypes = []  # List of haplotype strings
+n_samples = 0
+
+with gzip.open(vcf_file, 'rt') if vcf_file.endswith('.gz') else open(vcf_file) as f:
+    for line in f:
+        if line.startswith('##'):
+            continue
+        if line.startswith('#CHROM'):
+            # Header line - count samples
+            fields = line.strip().split('\\t')
+            n_samples = len(fields) - 9
+            # Initialize haplotype lists (2 per sample)
+            haplotypes = [[] for _ in range(n_samples * 2)]
+            continue
+
+        # Data line
+        fields = line.strip().split('\\t')
+        gts = fields[9:]
+
+        for i, gt in enumerate(gts):
+            gt_val = gt.split(':')[0]
+
+            # Parse phased (|) or unphased (/) genotype
+            if '|' in gt_val:
+                a1, a2 = gt_val.split('|')
+            elif '/' in gt_val:
+                a1, a2 = gt_val.split('/')
+            else:
+                a1, a2 = '.', '.'
+
+            # Convert to binary (0=ref, 1=alt, 9=missing)
+            def to_binary(a):
+                if a == '0':
+                    return '0'
+                elif a == '1':
+                    return '1'
+                else:
+                    return '9'
+
+            haplotypes[i * 2].append(to_binary(a1))
+            haplotypes[i * 2 + 1].append(to_binary(a2))
+
+# Write alleles file (each line is a haplotype, space-separated)
+with open(output_alleles, 'w') as out:
+    for hap in haplotypes:
+        out.write(' '.join(hap) + '\\n')
+
+print(f"Converted {n_samples} samples ({n_samples * 2} haplotypes)")
+print(f"Output: {output_alleles}")
+PYSCRIPT
+
+    # Count number of reference haplotypes for class file validation
+    n_ref_haps=\$(wc -l < ${reference_alleles})
+    n_query_haps=\$(wc -l < ${sample_id}_${server}_chr${chr}_query.alleles)
+    echo "Reference haplotypes: \$n_ref_haps"
+    echo "Query haplotypes: \$n_query_haps"
+
+    # Combine query with reference alleles
+    # Query samples go first, then reference samples
+    cat ${sample_id}_${server}_chr${chr}_query.alleles ${reference_alleles} > combined_alleles.txt
+
+    # RFMix v1 PopPhased command
+    # Based on: https://github.com/armartin/ancestry_pipeline
+    # Options:
+    #   -e 2: EM iterations (recommended 2)
+    #   -w 0.2: Window size in cM
+    #   --use-reference-panels-in-EM: Use reference panels in EM optimization
+    #   --forward-backward: Run forward-backward algorithm
+    echo ""
+    echo "Step 2: Running RFMix v1 PopPhased..."
+    \${RFMIX_V1_PATH:-RFMix_PopPhased} \\
+        -a combined_alleles.txt \\
+        -p ${reference_classes} \\
+        -m ${marker_locations} \\
+        -o ${sample_id}_${server}_chr${chr} \\
+        -w 0.2 \\
+        -e 2 \\
+        --use-reference-panels-in-EM \\
+        --forward-backward \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.rfmix1.log
+
+    echo ""
+    echo "=== RFMix v1 complete for chr${chr} ==="
+    echo "Output files:"
+    echo "  - ${sample_id}_${server}_chr${chr}.0.Viterbi.txt (Viterbi path)"
+    echo "  - ${sample_id}_${server}_chr${chr}.allelesRephased0.txt (rephased alleles)"
     """
 }
 
@@ -1475,37 +1766,80 @@ workflow MODULE7_ANCESTRY {
     )
     
     // Step 5: Local Ancestry Inference (OPTIONAL - if enabled)
+    // Only runs the method(s) specified in params.lai_methods (default: 'rfmix2')
+    // Supports: rfmix2 (default), rfmix1, flare, gnomix
+    // Multiple methods can be comma-separated: 'rfmix2,flare'
     if (params.run_lai) {
         // Get VCF data for LAI
         lai_input = imputed_vcf
-        
+
         PREPARE_FOR_LAI(lai_input)
-        
+
         // Split by chromosome
         chromosomes = Channel.of(1..22)
         lai_chr_data = PREPARE_FOR_LAI.out.phased_vcf.combine(chromosomes)
-        
-        // Run selected LAI tool
-        if (params.lai_tool == 'rfmix_v2' || params.lai_tool == 'all') {
-            reference_vcf = file(params.rfmix_reference_vcf)
-            reference_map = file(params.rfmix_reference_map)
-            genetic_maps = file(params.genetic_maps_dir)
-            
-            RFMIX_V2(
-                lai_chr_data,
-                reference_vcf,
-                reference_map,
-                genetic_maps
-            )
-            
-            // Summarize LAI results
-            lai_grouped = RFMIX_V2.out.results.groupTuple(by: [0, 1])
-            
-            SUMMARIZE_LAI(
-                lai_grouped,
-                PREPARE_FOR_ANCESTRY.out.pruned_data.map { it[4] }
-            )
-        }
+
+        // Load reference files based on config
+        genetic_map_dir = file(params.genetic_map_dir)
+
+        // === RFMix v2 (DEFAULT) ===
+        // When condition in process handles whether to run based on params.lai_methods
+        reference_vcf = file(params.rfmix_reference_vcf)
+        reference_map = file(params.rfmix_reference_map)
+
+        RFMIX_V2(
+            lai_chr_data,
+            reference_vcf,
+            reference_map,
+            genetic_map_dir
+        )
+
+        // === FLARE ===
+        flare_reference_vcf = file(params.flare_reference_vcf)
+        flare_panel_file = file(params.flare_panel_file)
+
+        FLARE_LAI(
+            lai_chr_data,
+            flare_reference_vcf,
+            flare_panel_file,
+            genetic_map_dir
+        )
+
+        // === G-NOMIX ===
+        gnomix_model_dir = file(params.gnomix_model_dir)
+
+        GNOMIX_LAI(
+            lai_chr_data,
+            gnomix_model_dir,
+            genetic_map_dir
+        )
+
+        // === RFMix v1 (Legacy) ===
+        rfmix1_alleles = file(params.rfmix1_reference_alleles)
+        rfmix1_classes = file(params.rfmix1_reference_classes)
+        rfmix1_snp_locations = file(params.rfmix1_snp_locations ?: 'NO_FILE')
+
+        RFMIX_V1(
+            lai_chr_data,
+            rfmix1_alleles,
+            rfmix1_classes,
+            rfmix1_snp_locations
+        )
+
+        // Collect LAI results from whichever method(s) ran
+        // RFMix v2 is the default, so prioritize its output for summary
+        lai_results = params.lai_methods.contains('rfmix2')
+            ? RFMIX_V2.out.results.groupTuple(by: [0, 1])
+            : (params.lai_methods.contains('flare')
+                ? FLARE_LAI.out.results.groupTuple(by: [0, 1])
+                : (params.lai_methods.contains('gnomix')
+                    ? GNOMIX_LAI.out.results.groupTuple(by: [0, 1])
+                    : RFMIX_V1.out.results.groupTuple(by: [0, 1])))
+
+        SUMMARIZE_LAI(
+            lai_results,
+            PREPARE_FOR_ANCESTRY.out.pruned_data.map { it[4] }
+        )
     }
     
     // Step 6: PCA colored by ancestry

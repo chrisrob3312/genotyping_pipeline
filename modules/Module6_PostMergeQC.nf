@@ -56,39 +56,44 @@ process CHECK_INPUT_SOURCE {
 
 /*
  * Process 2: Apply MagicalRsq-X Filtering
- * Uses pre-trained models to filter variants with R² > 0.3 OR genotyped variants
- * Separate processing for TOPMed vs All of Us
+ * Uses pre-trained XGBoost models from https://github.com/quansun98/MagicalRsqX
+ * Models available: EUR, AFR, AMR, EAS (trained on TOPMed cohorts)
+ * Filters variants with MagicalRsq-X R² > 0.3 OR genotyped variants
+ * Publication: Sun Q et al., AJHG 2024
  */
 process MAGICALRSQX_FILTER {
     tag "${sample_id}_chr${chr}_${server}"
     label 'process_medium'
     publishDir "${params.outdir}/module6/01_magicalrsq/${server}", mode: 'copy'
-    
+
     input:
     tuple val(sample_id), val(source), path(vcf), path(index), val(server), val(chr)
     path(magicalrsqx_script)
     path(magicalrsqx_models)
-    
+
     output:
-    tuple val(sample_id), path("${sample_id}_chr${chr}_${server}_filtered.vcf.gz"), 
-          path("${sample_id}_chr${chr}_${server}_filtered.vcf.gz.csi"), 
+    tuple val(sample_id), path("${sample_id}_chr${chr}_${server}_filtered.vcf.gz"),
+          path("${sample_id}_chr${chr}_${server}_filtered.vcf.gz.csi"),
           val(server), val(chr), emit: filtered_vcf
     path("${sample_id}_chr${chr}_${server}_magicalrsq_stats.txt"), emit: stats
     path("${sample_id}_chr${chr}_${server}_rsq_comparison.pdf"), emit: plot
-    
+
     script:
-    def ancestry_flag = params.primary_ancestry == 'EUR' ? '--ancestry EUR' : '--ancestry AFR'
+    // Select ancestry-specific model: EUR, AFR, AMR, or EAS
+    def ancestry = params.primary_ancestry ?: 'EUR'
+    def model_file = "${magicalrsqx_models}/${ancestry}_model.rds"
     """
     #!/usr/bin/env bash
     set -euo pipefail
-    
+
     echo "=== MagicalRsq-X Filtering for ${sample_id} chr${chr} (${server}) ==="
-    
-    # Step 1: Calculate MagicalRsq-X scores using pre-trained models
+    echo "Using ${ancestry} ancestry model: ${model_file}"
+
+    # Step 1: Calculate MagicalRsq-X scores using pre-trained XGBoost models
+    # MagicalRsq-X repo: https://github.com/quansun98/MagicalRsqX
     Rscript ${magicalrsqx_script} \\
         --vcf ${vcf} \\
-        --models ${magicalrsqx_models} \\
-        ${ancestry_flag} \\
+        --model ${model_file} \\
         --output ${sample_id}_chr${chr}_${server}_magicalrsqx.txt \\
         --threads ${task.cpus}
     
@@ -356,16 +361,22 @@ process FILTER_CALL_RATE {
 
 /*
  * Process 7: Filter by Hardy-Weinberg Equilibrium (HWE)
- * Remove variants with HWE p-value < 1e-6
+ * Remove variants with HWE p-value < threshold
+ * NOTE: Skipped by default (params.skip_hwe=true) for admixed populations
+ *       HWE assumptions are violated in admixed/structured populations
+ *       Enable with --skip_hwe false if working with homogeneous populations
  */
 process FILTER_HWE {
     tag "${sample_id}_${server}"
     label 'process_medium'
     publishDir "${params.outdir}/module6/06_hwe_filtered/${server}", mode: 'copy'
-    
+
     input:
     tuple val(sample_id), val(server), path(bed), path(bim), path(fam)
-    
+
+    when:
+    !params.skip_hwe
+
     output:
     tuple val(sample_id), val(server),
           path("${sample_id}_${server}_hwe.bed"),
@@ -373,32 +384,32 @@ process FILTER_HWE {
           path("${sample_id}_${server}_hwe.fam"), emit: filtered_files
     path("${sample_id}_${server}.hwe"), emit: hwe_stats
     path("${sample_id}_${server}_hwe_filter_log.txt"), emit: filter_log
-    
+
     script:
-    def hwe_threshold = params.hwe_threshold ?: 1e-6
+    def hwe_threshold = params.hwe_pvalue ?: 1e-6
     """
     echo "=== HWE filtering for ${sample_id} (${server}) ==="
     echo "HWE threshold: ${hwe_threshold}"
-    
+
     # Count before
     n_variants_before=\$(wc -l < ${bim})
-    
+
     # Calculate HWE
     plink --bfile ${sample_id}_${server} \\
         --hardy \\
         --out ${sample_id}_${server} \\
         --threads ${task.cpus}
-    
+
     # Filter variants failing HWE
     plink --bfile ${sample_id}_${server} \\
         --hwe ${hwe_threshold} \\
         --make-bed \\
         --out ${sample_id}_${server}_hwe \\
         --threads ${task.cpus}
-    
+
     # Count after
     n_variants_after=\$(wc -l < ${sample_id}_${server}_hwe.bim)
-    
+
     # Log
     {
         echo "HWE Filtering Results (${server})"
@@ -408,7 +419,7 @@ process FILTER_HWE {
         echo "Variants after: \$n_variants_after"
         echo "Variants removed: \$((n_variants_before - n_variants_after))"
     } > ${sample_id}_${server}_hwe_filter_log.txt
-    
+
     echo "=== HWE filtering complete ==="
     """
 }
@@ -1105,9 +1116,11 @@ workflow MODULE6_POSTMERGE_QC {
             tuple(sample_id, source, vcf, index, server, chr)
         }
     
-    // Get MagicalRsq-X scripts and models
-    magicalrsqx_script = file("${params.magicalrsqx_dir}/scripts/calculate_magicalrsqx.R")
-    magicalrsqx_models = file("${params.magicalrsqx_dir}/models")
+    // Get MagicalRsq-X scripts and models from container
+    // Reference: https://github.com/quansun98/MagicalRsqX
+    // Container has MagicalRsq-X installed at /opt/MagicalRsqX with pre-trained models
+    magicalrsqx_script = file("${params.magicalrsqx_dir}/MagicalRsqX.R")
+    magicalrsqx_models = file("${params.magicalrsqx_models}")
     
     // Step 3: Apply MagicalRsq-X filtering per chromosome
     MAGICALRSQX_FILTER(
@@ -1134,11 +1147,18 @@ workflow MODULE6_POSTMERGE_QC {
     // Step 7: Filter by call rate
     FILTER_CALL_RATE(CALCULATE_CALL_RATES.out.with_missingness)
     
-    // Step 8: Filter by HWE
+    // Step 8: Filter by HWE (skipped by default for admixed populations)
+    // HWE assumptions are violated in admixed/structured populations
+    // Enable with --skip_hwe false for homogeneous population studies
     FILTER_HWE(FILTER_CALL_RATE.out.filtered_files)
-    
+
+    // Conditionally route data: use HWE output if HWE ran, otherwise bypass
+    hwe_output = params.skip_hwe
+        ? FILTER_CALL_RATE.out.filtered_files
+        : FILTER_HWE.out.filtered_files
+
     // Step 9: Filter heterozygosity
-    FILTER_HETEROZYGOSITY(FILTER_HWE.out.filtered_files)
+    FILTER_HETEROZYGOSITY(hwe_output)
     
     // Step 10: Calculate kinship
     CALCULATE_KINSHIP(FILTER_HETEROZYGOSITY.out.filtered_files)
