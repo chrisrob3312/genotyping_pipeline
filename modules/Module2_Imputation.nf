@@ -358,25 +358,76 @@ process submitToAllOfUs {
         "status": "submitted"
     }
     
-    # Authenticate (if not already done)
-    print("Authenticating with terralab-cli...")
+    # =========================================================================
+    # AUTHENTICATION CHECK
+    # =========================================================================
+    # terralab-cli uses Terra OAuth authentication. Before running this pipeline,
+    # you MUST authenticate by running 'terralab login' interactively (opens browser).
+    # The credentials are stored locally and reused for subsequent commands.
+    #
+    # For HPC environments:
+    #   1. Run 'terralab login' on a node with browser access (login node)
+    #   2. Credentials are stored in ~/.config/terralab/ (or similar)
+    #   3. Ensure this directory is accessible from compute nodes
+    # =========================================================================
+
+    print("Checking terralab-cli authentication...")
     try:
-        # Check if already authenticated
+        # Check if already authenticated by listing jobs
         auth_check = subprocess.run(
             ["terralab", "jobs", "list"],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=60
         )
+
         if auth_check.returncode != 0:
-            print("  Running terralab login...")
-            # This will prompt user if in interactive session
-            # Or use stored credentials if available
-            subprocess.run(["terralab", "login"], check=False)
+            # Check for specific authentication error messages
+            if "login" in auth_check.stderr.lower() or "auth" in auth_check.stderr.lower() or "401" in auth_check.stderr:
+                print("ERROR: Not authenticated with terralab-cli!")
+                print("")
+                print("Before running this pipeline, you must authenticate:")
+                print("  1. On a machine with browser access, run:")
+                print("     terralab login")
+                print("")
+                print("  2. Complete the OAuth flow in your browser")
+                print("  3. Credentials will be stored locally for pipeline use")
+                print("")
+                print("For HPC: Run 'terralab login' on the login node first,")
+                print("         then submit this pipeline from the same environment.")
+                print("")
+                submission_data["status"] = "authentication_required"
+                submission_data["error"] = "terralab-cli not authenticated"
+                with open(f"{platform}_anvil_submission.json", 'w') as f:
+                    json.dump(submission_data, f, indent=2)
+                sys.exit(1)
+            else:
+                # Some other error - might still work
+                print(f"  Warning: terralab jobs list returned: {auth_check.stderr}")
+        else:
+            print("✓ terralab-cli authenticated")
+
+    except FileNotFoundError:
+        print("ERROR: terralab-cli not found!")
+        print("")
+        print("Install terralab-cli:")
+        print("  pip install terralab-cli")
+        print("")
+        print("Then authenticate:")
+        print("  terralab login")
+        print("")
+        submission_data["status"] = "cli_not_found"
+        submission_data["error"] = "terralab-cli not installed"
+        with open(f"{platform}_anvil_submission.json", 'w') as f:
+            json.dump(submission_data, f, indent=2)
+        sys.exit(1)
+
+    except subprocess.TimeoutExpired:
+        print("  Warning: Authentication check timed out - proceeding anyway")
+
     except Exception as e:
-        print(f"  Note: Authentication may be required - {e}")
-    
-    print("✓ Authentication checked")
+        print(f"  Warning: Authentication check failed - {e}")
+
     print("")
     
     # Prepare merged VCF (All of Us requires single multi-sample VCF)
