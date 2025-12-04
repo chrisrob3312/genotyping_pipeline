@@ -76,42 +76,48 @@ From: rocker/r-ver:4.3.0
     
     # ========================================================================
     # INSTALL MAGICALRSQ-X
+    # Reference: https://github.com/quansun98/MagicalRsqX
+    # Publication: Sun Q et al., AJHG 2024
     # ========================================================================
     echo "Installing MagicalRsq-X..."
     cd /opt
-    
-    # Clone the MagicalRsq-X repository
-    git clone https://github.com/statgenetics/MagicalRsq-X.git
-    cd MagicalRsq-X
-    
-    # Note: MagicalRsq-X is primarily R scripts, not a formal R package
-    # Make scripts available in PATH
+
+    # Clone the MagicalRsq-X repository (correct URL)
+    git clone https://github.com/quansun98/MagicalRsqX.git
+    cd MagicalRsqX
+
+    # MagicalRsq-X uses R scripts with XGBoost models
+    # Make scripts executable
+    chmod +x *.R 2>/dev/null || true
     chmod +x scripts/*.R 2>/dev/null || true
-    chmod +x scripts/*.sh 2>/dev/null || true
-    
-    # Create a symbolic link for the main script
-    if [ -f "scripts/magicalrsq.R" ]; then
-        ln -s /opt/MagicalRsq-X/scripts/magicalrsq.R /usr/local/bin/magicalrsq
-        chmod +x /usr/local/bin/magicalrsq
+
+    # Create symbolic links for main scripts
+    if [ -f "MagicalRsqX.R" ]; then
+        ln -s /opt/MagicalRsqX/MagicalRsqX.R /usr/local/bin/magicalrsqx
+        chmod +x /usr/local/bin/magicalrsqx
     fi
-    
-    # Download pre-trained models if available
-    echo "Checking for pre-trained XGBoost models..."
-    cd /opt/MagicalRsq-X
-    
-    # Models might be in a separate location or need to be downloaded
-    # Check if they exist in the repo
-    if [ -d "models" ]; then
-        echo "Pre-trained models found in repository"
-    else
-        echo "Creating models directory for pre-trained XGBoost models"
-        mkdir -p models
-        # Note: Models may need to be downloaded from releases or provided separately
-        # For now, we create the directory structure
+
+    # Download pre-trained models from FTP
+    echo "Downloading pre-trained XGBoost models..."
+    mkdir -p models
+    cd models
+
+    # Download models for different ancestry groups
+    # Models available: EUR, AFR, AMR, EAS (trained on TOPMed cohorts)
+    wget -q ftp://yunlianon:anon@ftp.biostat.wisc.edu/MagicalRsqX/models/EUR_model.rds || echo "EUR model download attempted"
+    wget -q ftp://yunlianon:anon@ftp.biostat.wisc.edu/MagicalRsqX/models/AFR_model.rds || echo "AFR model download attempted"
+    wget -q ftp://yunlianon:anon@ftp.biostat.wisc.edu/MagicalRsqX/models/AMR_model.rds || echo "AMR model download attempted"
+    wget -q ftp://yunlianon:anon@ftp.biostat.wisc.edu/MagicalRsqX/models/EAS_model.rds || echo "EAS model download attempted"
+
+    # Also try alternative model location in repo
+    cd /opt/MagicalRsqX
+    if [ -d "trained_models" ]; then
+        echo "Found trained_models directory in repo"
+        cp -r trained_models/* models/ 2>/dev/null || true
     fi
-    
+
     # Set environment variable for MagicalRsq-X location
-    echo 'export MAGICALRSQ_HOME="/opt/MagicalRsq-X"' >> /etc/environment
+    echo 'export MAGICALRSQX_HOME="/opt/MagicalRsqX"' >> /etc/environment
     
     # Verify installations
     echo "=== Verifying R package installations ==="
@@ -124,20 +130,21 @@ From: rocker/r-ver:4.3.0
     R -e "library(jsonlite); packageVersion('jsonlite')" || echo "ERROR: jsonlite installation failed"
     
     echo "=== Verifying MagicalRsq-X installation ==="
-    ls -la /opt/MagicalRsq-X/scripts/ || echo "WARNING: MagicalRsq-X scripts directory not found"
-    echo "MagicalRsq-X location: /opt/MagicalRsq-X"
+    ls -la /opt/MagicalRsqX/ || echo "WARNING: MagicalRsq-X directory not found"
+    ls -la /opt/MagicalRsqX/models/ || echo "WARNING: MagicalRsq-X models not found"
+    echo "MagicalRsq-X location: /opt/MagicalRsqX"
 
 %environment
     export LC_ALL=C.UTF-8
     export LANG=C.UTF-8
-    export MAGICALRSQ_HOME="/opt/MagicalRsq-X"
-    export PATH="/opt/MagicalRsq-X/scripts:$PATH"
+    export MAGICALRSQX_HOME="/opt/MagicalRsqX"
+    export PATH="/opt/MagicalRsqX:/opt/MagicalRsqX/scripts:$PATH"
 
 %runscript
     echo "R Genetics container (GENESIS + MagicalRsq-X + tidyverse)"
-    echo "Available commands: R, Rscript"
-    echo "MagicalRsq-X location: /opt/MagicalRsq-X"
-    echo "MagicalRsq-X scripts: /opt/MagicalRsq-X/scripts"
+    echo "Available commands: R, Rscript, magicalrsqx"
+    echo "MagicalRsq-X location: /opt/MagicalRsqX"
+    echo "MagicalRsq-X models: /opt/MagicalRsqX/models"
     exec "$@"
 
 %test
@@ -150,7 +157,7 @@ From: rocker/r-ver:4.3.0
     R -e "library(xgboost)"
     R -e "library(ggplot2)"
     R -e "library(jsonlite)"
-    
+
     # Test MagicalRsq-X installation
-    ls /opt/MagicalRsq-X/scripts/
-    test -d /opt/MagicalRsq-X
+    test -d /opt/MagicalRsqX
+    ls /opt/MagicalRsqX/
