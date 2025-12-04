@@ -64,26 +64,91 @@ OUR PIPELINE (Approach E/F):
 
 ## Metrics Calculated
 
-### Per-Ancestry Group (GRAF-anc 8 Major Groups)
+### 1. Variant-Level Imputation Quality
+
+| Metric | Description | Stratification |
+|--------|-------------|----------------|
+| INFO/R² Score | Imputation accuracy estimate | MAF, ancestry, functional category |
+| MagicalRsq-X | Ancestry-calibrated quality | Ancestry-specific models |
+| Variant Retention | % variants passing QC | MAF bin, ancestry |
+| Imputation Rate | % variants successfully imputed | Platform, ancestry |
+
+### 2. Concordance with WGS Truth
 
 | Metric | Description | Expected (Common) | Expected (Rare) |
 |--------|-------------|-------------------|-----------------|
-| Dosage R² | Correlation with WGS | >0.95 | >0.70 |
-| Genotype Concordance | Exact GT match | >98% | >90% |
+| Genotype Concordance | Exact GT match rate | >98% | >90% |
+| Dosage R² | Correlation of dosage with truth | >0.95 | >0.70 |
 | Non-Reference Concordance | Alt allele accuracy | >95% | >85% |
-| Variant Yield | Variants passing QC | - | - |
-| Imputation Rate | % variants imputed | - | - |
+| Heterozygote Concordance | Het call accuracy | >95% | >80% |
 
-### Stratified By
-- MAF bins: 0-0.5%, 0.5-1%, 1-5%, 5-50%
-- Ancestry group: AFR, EUR, EAS, SAS, AMR, MEN, OCN, MIX
-- Chromosome (to check consistency)
+### 3. Cross-Platform Reproducibility
+- Genotype concordance for samples typed on multiple arrays
+- Dosage correlation across platforms post-imputation
+- Platform-specific variant bias detection
 
-### Computational Metrics
-- Wall-clock time
-- CPU hours
-- Peak memory usage
-- Storage requirements
+### 4. Association/PRS Performance
+| Metric | Description | Stratification |
+|--------|-------------|----------------|
+| Effect Size Bias | Deviation from expected β | Ancestry, MAF |
+| Lambda (λ GC) | Genomic inflation factor | Ancestry |
+| Power | % known GWAS hits recovered | Ancestry, trait |
+| PRS R² | Variance explained by PRS | Ancestry group |
+| PRS AUC | Discriminative ability | Ancestry group |
+
+### 5. Ancestry-Aware Metrics
+| Metric | Description | Notes |
+|--------|-------------|-------|
+| Global Ancestry Quality | INFO by GRAF-anc group | 8 major + 50 subgroups |
+| Local Ancestry Quality | INFO by LAI tract ancestry | Per-chromosome segments |
+| Ancestry-Specific Allele Freq | AF bias by ancestry | Compare to gnomAD |
+| LAI-Aware PRS | Tractor framework performance | Ancestry-specific effects |
+
+### 6. Stratification Dimensions
+- **MAF bins:** 0-0.1%, 0.1-0.5%, 0.5-1%, 1-5%, 5-50%
+- **Global ancestry:** AFR, EUR, EAS, SAS, AMR, MEN, OCN, MIX (GRAF-anc)
+- **Local ancestry:** AFR, EUR, NAT tracts (from RFMix2/FLARE)
+- **Functional category:** Exonic, intronic, intergenic, GWAS catalog
+- **Chromosome:** Per-chromosome consistency check
+
+### 7. Computational Metrics
+| Metric | Description |
+|--------|-------------|
+| Wall-clock time | Total runtime |
+| CPU hours | Computational cost |
+| Peak memory | Maximum RAM usage |
+| Storage | Disk space required |
+| I/O operations | Read/write load |
+
+## Publication Figures
+
+### Main Figures
+
+| Figure | Content | Type |
+|--------|---------|------|
+| **Fig 1** | Pipeline overview flowchart | Schematic |
+| **Fig 2** | Concordance by MAF × Ancestry (heatmap) | Heatmap |
+| **Fig 3** | INFO/R² distributions by approach | Violin/Box |
+| **Fig 4A** | Local ancestry–specific imputation quality | Heatmap (ancestry × MAF) |
+| **Fig 4B** | INFO difference by LAI tracts | Violin plot |
+| **Fig 4C** | PRS R²/AUC by ancestry group | Barplot |
+| **Fig 5A** | GWAS Manhattan plots comparison | Manhattan |
+| **Fig 5B** | QQ plots showing inflation | QQ plot |
+| **Fig 5C** | % known GWAS hits by ancestry | Barplot |
+| **Fig 6** | Computational efficiency comparison | Scatter/Bar |
+
+### Supplementary Tables
+
+| Table | Content |
+|-------|---------|
+| **S1** | Variant inclusion/exclusion summary per array |
+| **S2** | Per-chromosome variant counts and R² distributions |
+| **S3** | Per-ancestry imputation quality metrics |
+| **S4** | Correlation between global ancestry and imputation accuracy |
+| **S5** | Standard INFO vs MagicalRsq-X filtering comparison |
+| **S6** | Computational resource summary by approach |
+| **S7** | Cross-platform reproducibility metrics |
+| **S8** | Functional annotation enrichment by ancestry |
 
 ## Directory Structure
 
