@@ -22,12 +22,12 @@ nextflow.enable.dsl=2
 // ============================================================================
 
 include { PRE_IMPUTATION_QC } from './modules/Module1_PreImputation'
-include { IMPUTATION } from './modules/Module2_Imputation'
-include { POST_IMPUTATION_QC } from './modules/Module3_PostQC'
-include { PLATFORM_MERGING } from './modules/Module4_Merging'
-include { RE_IMPUTATION } from './modules/Module5_ReImputation'
-include { POST_MERGE_QC } from './modules/Module6_PostMergeQC'
-include { ANCESTRY_ESTIMATION } from './modules/Module7_Ancestry'
+include { MODULE2_IMPUTATION as IMPUTATION } from './modules/Module2_Imputation'
+include { MODULE3_POSTQC as POST_IMPUTATION_QC } from './modules/Module3_PostQC'
+include { MODULE4_MERGING as PLATFORM_MERGING } from './modules/Module4_Merging'
+include { MODULE5_REIMPUTATION as RE_IMPUTATION } from './modules/Module5_ReImputation'
+include { MODULE6_POSTMERGE_QC as POST_MERGE_QC } from './modules/Module6_PostMergeQC'
+include { MODULE7_ANCESTRY as ANCESTRY_ESTIMATION } from './modules/Module7_Ancestry'
 
 // ============================================================================
 // HELP MESSAGE

@@ -322,25 +322,16 @@ workflow {
     ============================================================================
     """.stripIndent()
     
-    // Definition files for custom builds
-    def_files = Channel.fromPath("${projectDir}/container_definitions/*.def")
-        .map { file -> tuple(file.baseName, file) }
-        .branch {
-            python_api: it[0] == 'python_api'
-            r_genetics: it[0] == 'r_genetics'
-            ancestry: it[0] == 'ancestry_suite'
-        }
-    
     // Build simple containers (Docker pulls)
     pullPLINK19()
     pullPLINK20()
     pullBcftools()
     
     // Build custom containers
-    buildPerlCrossMap(Channel.fromPath("${projectDir}/container_definitions/perl_crossmap.def"))
-    buildPythonAPI(def_files.python_api.map { it[1] })
-    buildRGenetics(def_files.r_genetics.map { it[1] })
-    buildAncestrySuite(def_files.ancestry.map { it[1] })
+    buildPerlCrossMap(Channel.fromPath("${projectDir}/container_definitions/perl_crossmap-3.def"))
+    buildPythonAPI(Channel.fromPath("${projectDir}/container_definitions/python_api-4.def"))
+    buildRGenetics(Channel.fromPath("${projectDir}/container_definitions/r_genetics_CORRECTED.def"))
+    buildAncestrySuite(Channel.fromPath("${projectDir}/container_definitions/ancestry_suite_CORRECTED.def"))
     
     // Validate all containers
     validateContainers(
