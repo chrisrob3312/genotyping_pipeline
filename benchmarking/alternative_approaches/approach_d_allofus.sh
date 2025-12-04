@@ -2,10 +2,18 @@
 ################################################################################
 # approach_d_allofus.sh
 #
-# APPROACH D: Intersect → QC-After (Verma 2014 / Charon 2021 style) + All of Us
+# APPROACH D: Merge AFTER Imputation with Traditional R² Filter + All of Us
 #
-# Philosophy: Intersect for consistency, but delay QC until after imputation
-# Based on: Verma 2014 workflow + Charon 2021 QC timing findings
+# Philosophy: Impute each platform separately, then merge. Uses traditional R² filter.
+# KEY COMPARISON: Same workflow as E/F (our pipeline) but with R² instead of MagicalRsq-X.
+#
+# This comparison shows the value of MagicalRsq-X over traditional R² filtering.
+#
+# Workflow:
+#   Platform 1 → Minimal QC → Ref Align → Impute ─┐
+#   Platform 2 → Minimal QC → Ref Align → Impute ─┼─→ INTERSECT/MERGE → R² > 0.3 → Thorough QC
+#   Platform 3 → Minimal QC → Ref Align → Impute ─┘
+#                                        (separately)  (AFTER impute)   (traditional)
 #
 # Usage:
 #   ./approach_d_allofus.sh \
@@ -27,16 +35,14 @@ INPUT_BEDS=""
 OUTPUT_DIR="./results/approach_d_allofus"
 THREADS=4
 
-# Minimal pre-imputation QC
-PRE_GENO_THRESHOLD=0.10
-PRE_MIND_THRESHOLD=0.10
+# Standardized QC thresholds (from common_functions.sh)
+# STANDARD_GENO=0.05 (95% call rate)
+# STANDARD_MIND=0.05 (95% call rate)
+# SKIP_HWE=true (for mixed cohorts)
+# KINSHIP_THRESHOLD=0.125
 
-# Thorough post-imputation QC
+# R² filter (traditional) - KEY DIFFERENCE from E/F which use MagicalRsq-X
 R2_THRESHOLD=0.3
-POST_MAF_THRESHOLD=0.01
-POST_HWE_PVALUE=1e-6
-POST_GENO_THRESHOLD=0.02
-POST_MIND_THRESHOLD=0.02
 
 # =============================================================================
 # Parse Arguments
@@ -46,7 +52,18 @@ print_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-APPROACH D: Intersect → QC-After (Verma/Charon style) + All of Us.
+APPROACH D: Merge AFTER Imputation with Traditional R² Filter + All of Us
+
+KEY COMPARISON: Same workflow as our pipeline (E/F) but using traditional R²
+filter instead of MagicalRsq-X. This directly tests the value of MagicalRsq-X.
+
+Workflow:
+  1. Minimal QC on each platform (95% call rate only)
+  2. Reference alignment (Rayner script) on each platform
+  3. Impute each platform SEPARATELY via All of Us
+  4. MERGE across platforms AFTER imputation
+  5. R² > 0.3 filter (traditional)
+  6. Thorough post-imputation QC (MAF, HWE optional, relatedness)
 
 Required:
   --inputs LIST            Comma-separated PLINK prefixes
@@ -56,6 +73,8 @@ Optional:
   -t, --threads N          Threads (default: 4)
   --r2 FLOAT               R² threshold (default: 0.3)
   -h, --help               Show this help
+
+D vs E comparison: Does MagicalRsq-X improve over R²?
 
 EOF
 }
@@ -80,147 +99,200 @@ fi
 # Setup
 # =============================================================================
 
-mkdir -p "${OUTPUT_DIR}"/{logs,intersect,qc_before,liftover,imputation,qc_after,final}
+mkdir -p "${OUTPUT_DIR}"/{logs,per_platform,imputation,merge,qc_after,final}
 setup_logging "${OUTPUT_DIR}"
 
 log "=============================================="
-log "APPROACH D: Intersect → QC-After + All of Us"
+log "APPROACH D: Merge AFTER Imputation + R² Filter"
 log "=============================================="
+log "Server: All of Us"
+log "KEY: Same as our pipeline but with R² instead of MagicalRsq-X"
 log "Inputs: ${INPUT_BEDS}"
 log "Output: ${OUTPUT_DIR}"
+log "R² threshold: ${R2_THRESHOLD}"
 
 TOTAL_START=$(date +%s)
 
 IFS=',' read -ra PLATFORMS <<< "$INPUT_BEDS"
 N_PLATFORMS=${#PLATFORMS[@]}
+log "Number of platforms: ${N_PLATFORMS}"
 
 # =============================================================================
-# STEP 1: INTERSECT VARIANTS
+# STEP 1: PER-PLATFORM MINIMAL QC + REFERENCE ALIGNMENT
 # =============================================================================
 
 log ""
-log "=== STEP 1: Intersect Variants ==="
-time_start "STEP1_INTERSECT"
-
-cd "${OUTPUT_DIR}/intersect"
+log "=== STEP 1: Per-Platform Minimal QC and Reference Alignment ==="
+time_start "STEP1_PER_PLATFORM_PREP"
 
 for i in "${!PLATFORMS[@]}"; do
-    cut -f2 "${PLATFORMS[$i]}.bim" > "variants_${i}.txt"
+    PLATFORM="${PLATFORMS[$i]}"
+    PLATFORM_DIR="${OUTPUT_DIR}/per_platform/platform_${i}"
+    mkdir -p "${PLATFORM_DIR}"
+
+    log "  Processing platform ${i}: $(basename ${PLATFORM})"
+
+    # Minimal QC (call rate only)
+    log "    Running minimal QC..."
+    run_minimal_qc "${PLATFORM}" "${PLATFORM_DIR}/minimal_qcd" ${THREADS}
+
+    log "    After minimal QC: $(count_variants_samples ${PLATFORM_DIR}/minimal_qcd)"
+
+    # Reference alignment (Rayner script)
+    log "    Running reference alignment..."
+    run_reference_alignment "${PLATFORM_DIR}/minimal_qcd" "${PLATFORM_DIR}/ref_aligned" ${THREADS}
+
+    log "    After ref alignment: $(count_variants_samples ${PLATFORM_DIR}/ref_aligned)"
 done
 
-if [[ ${N_PLATFORMS} -eq 1 ]]; then
-    cp variants_0.txt common_variants.txt
-else
-    cp variants_0.txt common_tmp.txt
-    for i in $(seq 1 $((N_PLATFORMS - 1))); do
-        comm -12 <(sort common_tmp.txt) <(sort "variants_${i}.txt") > common_tmp2.txt
-        mv common_tmp2.txt common_tmp.txt
+time_end "STEP1_PER_PLATFORM_PREP"
+
+# =============================================================================
+# STEP 2: PER-PLATFORM IMPUTATION (SEPARATELY)
+# =============================================================================
+
+log ""
+log "=== STEP 2: Per-Platform Imputation via All of Us (SEPARATE) ==="
+time_start "STEP2_IMPUTATION"
+
+for i in "${!PLATFORMS[@]}"; do
+    PLATFORM_DIR="${OUTPUT_DIR}/per_platform/platform_${i}"
+    IMPUTE_DIR="${OUTPUT_DIR}/imputation/platform_${i}"
+    mkdir -p "${IMPUTE_DIR}"
+
+    log "  Imputing platform ${i}..."
+
+    cd "${IMPUTE_DIR}"
+
+    # Convert to VCF and liftover to hg38
+    plink2 --bfile "${PLATFORM_DIR}/ref_aligned" \
+        --export vcf-4.2 bgz \
+        --out pre_liftover \
+        --threads ${THREADS}
+
+    bcftools index pre_liftover.vcf.gz
+    run_liftover_hg38 pre_liftover.vcf.gz lifted_hg38.vcf.gz
+
+    # Split by chromosome
+    mkdir -p vcfs_for_imputation
+    for chr in {1..22}; do
+        bcftools view -r chr${chr} lifted_hg38.vcf.gz \
+            -Oz -o vcfs_for_imputation/chr${chr}.vcf.gz
+        bcftools index vcfs_for_imputation/chr${chr}.vcf.gz
     done
-    mv common_tmp.txt common_variants.txt
-fi
 
+    # Submit to All of Us
+    submit_allofus vcfs_for_imputation allofus_results || {
+        log "NOTE: Manual submission required for platform ${i}"
+    }
+
+    cd "${OUTPUT_DIR}"
+done
+
+time_end "STEP2_IMPUTATION"
+
+# =============================================================================
+# STEP 3: MERGE ACROSS PLATFORMS (AFTER IMPUTATION)
+# =============================================================================
+
+log ""
+log "=== STEP 3: Merge Across Platforms (AFTER imputation) ==="
+time_start "STEP3_MERGE"
+
+cd "${OUTPUT_DIR}/merge"
+
+# Check if imputation results exist
+IMPUTED_PLATFORMS=()
 for i in "${!PLATFORMS[@]}"; do
-    plink2 --bfile "${PLATFORMS[$i]}" \
-        --extract common_variants.txt \
-        --make-bed \
-        --out "platform_${i}" \
-        --threads ${THREADS}
+    IMPUTE_DIR="${OUTPUT_DIR}/imputation/platform_${i}/allofus_results"
+    if [[ -d "${IMPUTE_DIR}" ]]; then
+        IMPUTED_PLATFORMS+=("${IMPUTE_DIR}")
+        log "  Found results for platform ${i}"
+    fi
 done
 
-if [[ ${N_PLATFORMS} -gt 1 ]]; then
-    for i in $(seq 1 $((N_PLATFORMS - 1))); do
-        echo "platform_${i}"
-    done > merge_list.txt
+if [[ ${#IMPUTED_PLATFORMS[@]} -gt 0 ]]; then
+    # Concat chromosomes for each platform first
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        IMPUTE_DIR="${IMPUTED_PLATFORMS[$i]}"
+        ls "${IMPUTE_DIR}"/*.vcf.gz 2>/dev/null | sort -V > "vcf_list_${i}.txt"
 
-    plink2 --bfile platform_0 \
-        --pmerge-list merge_list.txt bfile \
-        --make-bed \
-        --out merged \
-        --threads ${THREADS}
-else
-    cp platform_0.* merged.*
+        if [[ -s "vcf_list_${i}.txt" ]]; then
+            bcftools concat -f "vcf_list_${i}.txt" -Oz -o "platform_${i}_imputed.vcf.gz"
+            bcftools index "platform_${i}_imputed.vcf.gz"
+        fi
+    done
+
+    # Find common variants across imputed platforms
+    log "  Finding common variants..."
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        if [[ -f "platform_${i}_imputed.vcf.gz" ]]; then
+            bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "platform_${i}_imputed.vcf.gz" > "variants_${i}.txt"
+        fi
+    done
+
+    # Intersect variants
+    if [[ ${#IMPUTED_PLATFORMS[@]} -eq 1 ]]; then
+        cp variants_0.txt common_variants.txt
+    else
+        cp variants_0.txt common_tmp.txt
+        for i in $(seq 1 $((${#IMPUTED_PLATFORMS[@]} - 1))); do
+            if [[ -f "variants_${i}.txt" ]]; then
+                comm -12 <(sort common_tmp.txt) <(sort "variants_${i}.txt") > common_tmp2.txt
+                mv common_tmp2.txt common_tmp.txt
+            fi
+        done
+        mv common_tmp.txt common_variants.txt
+    fi
+
+    N_COMMON=$(wc -l < common_variants.txt)
+    log "  Common variants after imputation: ${N_COMMON}"
+
+    # Create regions file for filtering
+    awk '{print $1":"$2"-"$2}' common_variants.txt > common_regions.txt
+
+    # Filter each platform to common variants and merge
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        if [[ -f "platform_${i}_imputed.vcf.gz" ]]; then
+            bcftools view -R common_regions.txt "platform_${i}_imputed.vcf.gz" \
+                -Oz -o "platform_${i}_common.vcf.gz"
+            bcftools index "platform_${i}_common.vcf.gz"
+        fi
+    done
+
+    # Merge samples from all platforms
+    ls platform_*_common.vcf.gz > merge_list.txt
+    bcftools merge -l merge_list.txt -Oz -o merged_imputed.vcf.gz
+    bcftools index merged_imputed.vcf.gz
+
+    log "  Merged: $(bcftools query -l merged_imputed.vcf.gz | wc -l) samples"
 fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP1_INTERSECT"
+time_end "STEP3_MERGE"
 
 # =============================================================================
-# STEP 2: MINIMAL PRE-IMPUTATION QC
-# =============================================================================
-
-log ""
-log "=== STEP 2: Minimal Pre-Imputation QC ==="
-time_start "STEP2_QC_MINIMAL"
-
-cd "${OUTPUT_DIR}/qc_before"
-
-plink2 --bfile ../intersect/merged \
-    --geno ${PRE_GENO_THRESHOLD} \
-    --mind ${PRE_MIND_THRESHOLD} \
-    --make-bed \
-    --out minimal_qcd \
-    --threads ${THREADS}
-
-cd "${OUTPUT_DIR}"
-time_end "STEP2_QC_MINIMAL"
-
-# =============================================================================
-# STEP 3: LIFTOVER AND SUBMIT
+# STEP 4: R² FILTER (TRADITIONAL)
 # =============================================================================
 
 log ""
-log "=== STEP 3: Liftover and Submit to All of Us ==="
-time_start "STEP3_IMPUTATION"
-
-cd "${OUTPUT_DIR}/liftover"
-
-plink2 --bfile ../qc_before/minimal_qcd \
-    --export vcf-4.2 bgz \
-    --out pre_liftover \
-    --threads ${THREADS}
-
-bcftools index pre_liftover.vcf.gz
-run_liftover_hg38 pre_liftover.vcf.gz lifted_hg38.vcf.gz
-
-cd "${OUTPUT_DIR}/imputation"
-
-for chr in {1..22}; do
-    bcftools view -r chr${chr} ../liftover/lifted_hg38.vcf.gz \
-        -Oz -o chr${chr}.vcf.gz
-    bcftools index chr${chr}.vcf.gz
-done
-
-mkdir -p vcfs_for_imputation
-mv chr*.vcf.gz* vcfs_for_imputation/
-
-submit_allofus vcfs_for_imputation allofus_results || {
-    log "NOTE: Manual submission required"
-}
-
-cd "${OUTPUT_DIR}"
-time_end "STEP3_IMPUTATION"
-
-# =============================================================================
-# STEP 4: R² FILTER
-# =============================================================================
-
-log ""
-log "=== STEP 4: Post-Imputation R² Filtering ==="
+log "=== STEP 4: R² Filter (Traditional) ==="
+log "  Threshold: R² > ${R2_THRESHOLD}"
 time_start "STEP4_R2_FILTER"
 
 cd "${OUTPUT_DIR}/qc_after"
 
-if [[ -d "../imputation/allofus_results" ]]; then
-    for vcf in ../imputation/allofus_results/*.vcf.gz; do
-        base=$(basename "$vcf" .vcf.gz)
-        filter_r2 "$vcf" "${base}_r2filt.vcf.gz" ${R2_THRESHOLD}
-    done
+if [[ -f "../merge/merged_imputed.vcf.gz" ]]; then
+    # Apply R² filter (traditional - KEY DIFFERENCE from E/F)
+    filter_r2 "../merge/merged_imputed.vcf.gz" "imputed_r2filt.vcf.gz" ${R2_THRESHOLD}
 
-    ls *_r2filt.vcf.gz 2>/dev/null | sort -V > vcf_list.txt
-    if [[ -s vcf_list.txt ]]; then
-        bcftools concat -f vcf_list.txt -Oz -o imputed_filtered.vcf.gz
-        plink2 --vcf imputed_filtered.vcf.gz --make-bed --out imputed_r2filt --threads ${THREADS}
-    fi
+    # Convert to PLINK
+    plink2 --vcf imputed_r2filt.vcf.gz \
+        --make-bed \
+        --out imputed_r2filt \
+        --threads ${THREADS}
+
+    log "  After R² filter: $(count_variants_samples imputed_r2filt)"
 fi
 
 cd "${OUTPUT_DIR}"
@@ -237,10 +309,27 @@ time_start "STEP5_QC_THOROUGH"
 cd "${OUTPUT_DIR}/final"
 
 if [[ -f "../qc_after/imputed_r2filt.bed" ]]; then
-    run_post_imputation_qc "../qc_after/imputed_r2filt" "approach_d_allofus" ${THREADS} \
-        ${POST_MAF_THRESHOLD} ${POST_HWE_PVALUE} ${POST_GENO_THRESHOLD} ${POST_MIND_THRESHOLD}
+    log "  Applying thorough QC (MAF, relatedness, HWE=${SKIP_HWE:-skipped})..."
+
+    run_thorough_qc "../qc_after/imputed_r2filt" "approach_d_allofus" ${THREADS}
 
     log "  Final: $(count_variants_samples approach_d_allofus)"
+
+    # Create GWAS and RVAS output tracks
+    log "  Creating output tracks..."
+
+    # GWAS track: MAF > 1%
+    plink2 --bfile approach_d_allofus \
+        --maf 0.01 \
+        --make-bed \
+        --out approach_d_allofus_gwas \
+        --threads ${THREADS}
+
+    log "    GWAS track (MAF>1%): $(count_variants_samples approach_d_allofus_gwas)"
+
+    # RVAS track: All variants (no MAF filter)
+    cp approach_d_allofus.* approach_d_allofus_rvas.*
+    log "    RVAS track (all variants): $(count_variants_samples approach_d_allofus_rvas)"
 fi
 
 cd "${OUTPUT_DIR}"
@@ -258,4 +347,21 @@ log "=============================================="
 log "APPROACH D (All of Us) Complete!"
 log "=============================================="
 log "Total time: $(seconds_to_human ${TOTAL_TIME})"
-log "Results: ${OUTPUT_DIR}/final/"
+log ""
+log "KEY WORKFLOW: Merge AFTER imputation with R² filter"
+log ""
+log "Steps performed:"
+log "  1. Per-platform minimal QC (95% call rate)"
+log "  2. Per-platform reference alignment (Rayner)"
+log "  3. Per-platform imputation via All of Us (SEPARATELY)"
+log "  4. MERGE across platforms (AFTER imputation)"
+log "  5. R² > ${R2_THRESHOLD} filter (traditional)"
+log "  6. Thorough post-imputation QC"
+log ""
+log "D vs E comparison: This uses R², E uses MagicalRsq-X"
+log "  → Same workflow, different quality filter"
+log "  → Shows value of ancestry-calibrated filtering"
+log ""
+log "Output tracks:"
+log "  GWAS: ${OUTPUT_DIR}/final/approach_d_allofus_gwas"
+log "  RVAS: ${OUTPUT_DIR}/final/approach_d_allofus_rvas"
