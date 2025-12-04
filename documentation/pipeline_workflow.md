@@ -128,7 +128,7 @@
 │ VISUALIZATIONS:                                                              │
 │ • PCA plots colored by ancestry                                              │
 │ • ADMIXTURE bar plots (sorted by ancestry)                                   │
-│ • Karyogram plots (for LAI)                                                  │
+│ • Summary-level LAI statistics (cohort-level)                                │
 └──────────────────────────────────────────────────────────────────────────────┘
                                        │
                                        ▼
@@ -170,23 +170,38 @@ nextflow run modules/Module0_Apptainer_Build.nf -profile apptainer
 
 ## MODULE 1: PRE-IMPUTATION QC
 
-See `documentation/Module_1_Workflow.md` for detailed process flow.
+Module 1 is responsible for harmonizing diverse input data formats into standardized, imputation-ready VCFs. The pipeline is designed to handle heterogeneous data sources while preserving maximum genetic diversity through UNION merge strategies.
 
-### Summary
+### Input Flexibility & Data Harmonization
+
+The pipeline accepts 4 different input file structures, automatically detecting and handling each:
+
+| File Structure | Description | Example |
+|----------------|-------------|---------|
+| `individual_samples` | Separate files per sample | `/path/sample001.bed`, `sample002.bed`, etc. |
+| `individual_chr_split` | Per-sample, chromosome-split | `/path/sample001_chr*.bed` |
+| `merged_batch` | Pre-merged batch file | `/path/batch_A.bed` (all samples combined) |
+| `merged_chr_split` | Pre-merged, chromosome-split | `/path/batch_A_chr*.bed` |
+
+**Format Support:** Both PLINK (bed/bim/fam) and VCF inputs are supported with automatic conversion.
+
+**Build Detection:** Genome build (hg19/hg38) is detected per-batch, not globally, allowing mixed-build inputs.
+
+### Summary Flow
 
 ```
 INPUT                    PROCESS                           OUTPUT
 ─────                    ───────                           ──────
-Sample Sheet  ───────►  Discover Files
+Sample Sheet  ───────►  Discover Files (4 structure types)
                               │
                               ▼
-                        Prepare Samples
+                        Prepare Samples (VCF→PLINK, concat chr-split)
                               │
                               ▼
-                        Merge to Batch (UNION)
+                        Merge to Batch (UNION - preserves all variants)
                               │
                               ▼
-                        Align to Reference
+                        Align to Reference (bcftools +fixref)
                               │
                               ▼
               ┌───────────────┴───────────────┐
@@ -194,27 +209,68 @@ Sample Sheet  ───────►  Discover Files
         hg19 batches                    hg38 batches
               │                               │
               ▼                               │
-        Liftover (CrossMap)                   │
+        Liftover (CrossMap VCF mode)          │
               │                               │
               └───────────────┬───────────────┘
                               ▼
                         All hg38
                               │
                               ▼
-                        Merge to Platform (UNION)
+                        Merge to Platform (UNION - ~99.999% retention)
                               │
                               ▼
               ┌───────────────┴───────────────┐
               ▼                               ▼
         TOPMed Validation              AnVIL Validation
+        (Will Rayner script)           (passthrough)
               │                               │
               ▼                               ▼
         Light QC                        Light QC
+        (biallelic, dups, call rate)   (biallelic, dups, call rate)
               │                               │
               ▼                               ▼
         Create TOPMed VCFs        Create AnVIL VCF  ───► Single VCF
         (22 per platform)                               (all autosomes)
 ```
+
+### Reference Alignment Process
+
+1. **Convert to VCF**: `plink2 --export vcf-4.2 bgz`
+2. **Split multiallelics**: `bcftools norm -m-any`
+3. **Check REF**: `bcftools norm --check-ref w`
+4. **Fix mismatches**: `bcftools +fixref` (strand flips, REF/ALT swaps)
+5. **Sort and index**: `bcftools sort && bcftools index -c`
+
+### Liftover Process (hg19 batches only)
+
+Uses CrossMap VCF mode (not BED mode) for accurate coordinate conversion:
+- Updates genomic coordinates hg19 → hg38
+- Validates REF alleles against hg38 reference
+- Handles strand orientation automatically
+- Creates `.unmap` file for failed lifts
+
+### Light QC Applied
+
+| Filter | Command | Purpose |
+|--------|---------|---------|
+| Biallelic SNPs | `--snps-only just-acgt --max-alleles 2` | Remove indels, multiallelic |
+| Remove duplicates | `--rm-dup exclude-all` | Eliminate duplicate positions |
+| Remove monomorphic | `--maf 0.000001` | Only removes truly invariant sites |
+| Variant call rate | `--geno 0.05` | ≥95% call rate per variant |
+| Sample call rate | `--mind 0.05` | ≥95% call rate per sample |
+
+**Explicitly NOT applied in Module 1:**
+- HWE filtering (Module 6 - optional)
+- MAF filtering (Module 6)
+- Heterozygosity filtering (Module 6)
+- Relatedness filtering (Module 6)
+
+### Service-Specific Outputs
+
+| Service | Output Format | Files | Notes |
+|---------|--------------|-------|-------|
+| TOPMed | VCF 4.2, CSI indexed | 22 per platform (chr1-22) | All chromosomes submitted as single job |
+| All of Us AnVIL | VCF 4.3, CSI indexed | 1 per platform (all autosomes) | 95% quota savings vs per-chr |
 
 ### Key Parameters
 
@@ -222,6 +278,8 @@ Sample Sheet  ───────►  Discover Files
 |-----------|---------|-------------|
 | `sample_call_rate` | 0.95 | Minimum sample call rate |
 | `variant_call_rate` | 0.95 | Minimum variant call rate |
+
+See `documentation/Module_1_Workflow.md` for complete process-level details.
 
 ---
 
@@ -467,11 +525,14 @@ FROM MODULE 5 (or MODULE 4):
               │
               ▼
 ┌═════════════════════════════════════════════════════════════════════════════┐
-║ PROCESS: HWE_FILTER                                                          ║
+║ PROCESS: HWE_FILTER (OPTIONAL - skipped by default)                          ║
 ╠─────────────────────────────────────────────────────────────────────────────╢
 ║ plink2 --hwe ${params.hwe_pvalue} midp                                       ║
 ║ Remove variants out of HWE (p < 1e-6)                                        ║
 ║ Using mid-p correction for small samples                                     ║
+║                                                                              ║
+║ SKIPPED BY DEFAULT (params.skip_hwe = true) for admixed populations         ║
+║ Set --skip_hwe false to enable HWE filtering                                ║
 └═════════════════════════════════════════════════════════════════════════════┘
               │
               ▼
@@ -530,10 +591,37 @@ FROM MODULE 5 (or MODULE 4):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `hwe_pvalue` | 1e-6 | HWE filter p-value threshold |
+| `skip_hwe` | true | Skip HWE filtering (recommended for admixed populations) |
+| `hwe_pvalue` | 1e-6 | HWE filter p-value threshold (if skip_hwe=false) |
 | `het_sd_threshold` | 3 | Heterozygosity SD threshold |
 | `use_genesis` | true | Use GENESIS PCRelate (vs PLINK) |
 | `kinship_threshold` | 0.177 | 1st-degree relatedness cutoff |
+
+### Imputation Server Comparison
+
+When both TOPMed and All of Us imputation are run, Module 6 generates comparative metrics:
+
+```
+┌═════════════════════════════════════════════════════════════════════════════┐
+║ PROCESS: COMPARE_IMPUTATION_PERFORMANCE                                      ║
+╠─────────────────────────────────────────────────────────────────────────────╢
+║ Compares TOPMed vs All of Us AnVIL results                                   ║
+║                                                                              ║
+║ Metrics Calculated:                                                          ║
+║   • Total variant counts per server                                          ║
+║   • Shared variants (intersection)                                           ║
+║   • Server-unique variants                                                   ║
+║   • MAF distribution comparison                                              ║
+║   • INFO/R² score distributions                                              ║
+║                                                                              ║
+║ Output:                                                                      ║
+║   • HTML comparison report                                                   ║
+║   • PDF visualization plots                                                  ║
+║   • Tab-delimited metrics file                                               ║
+╠─────────────────────────────────────────────────────────────────────────────╢
+║ Location: ${outdir}/module6/13_imputation_comparison/                        ║
+└═════════════════════════════════════════════════════════════════════════════┘
+```
 
 ---
 
@@ -636,15 +724,84 @@ FROM MODULE 6:
 ╠─────────────────────────────────────────────────────────────────────────────╢
 ║ Combine chromosome-level LAI results                                         ║
 ║ Generate genome-wide ancestry tracts                                         ║
-║ Create karyogram visualizations                                              ║
+║ Create summary-level LAI visualizations (no per-sample karyograms)          ║
 ║ Calculate per-ancestry statistics                                            ║
+║                                                                              ║
+║ NOTE: Per-sample karyograms are NOT generated to support large cohorts      ║
 ╠─────────────────────────────────────────────────────────────────────────────╢
-║ Output: Summary files + visualizations                                       ║
+║ Output: Summary files + cohort-level visualizations                          ║
 └═════════════════════════════════════════════════════════════════════════════┘
               │
               ▼
                          FINAL OUTPUTS
 ```
+
+### Imputation Performance by Ancestry
+
+Module 7 includes ancestry-stratified imputation quality analysis:
+
+```
+┌═════════════════════════════════════════════════════════════════════════════┐
+║ PROCESS: IMPUTATION_PERFORMANCE_BY_ANCESTRY                                  ║
+╠─────────────────────────────────────────────────────────────────────────────╢
+║ Stratifies imputation quality metrics by GRAF-anc ancestry groups            ║
+║                                                                              ║
+║ Metrics Tracked:                                                             ║
+║   • INFO score (from imputation server)                                      ║
+║   • R² score (imputation accuracy estimate)                                  ║
+║   • MagicalRsq-X calibrated scores (if enabled)                              ║
+║   • Variant counts by MAF bin                                                ║
+║                                                                              ║
+║ Stratification Levels:                                                       ║
+║   • 8 Major Groups: AFR, MEN, EUR, SAS, EAS, AMR, OCN, MIX                  ║
+║   • 50+ Subgroups: Detailed subcontinental populations                       ║
+║                                                                              ║
+║ Output:                                                                      ║
+║   • Summary statistics per ancestry group                                    ║
+║   • PDF plots comparing INFO/R² distributions                               ║
+║   • Tab-delimited metrics files                                              ║
+╠─────────────────────────────────────────────────────────────────────────────╢
+║ Location: ${outdir}/module7/06_imputation_performance/${server}/             ║
+└═════════════════════════════════════════════════════════════════════════════┘
+```
+
+### WGS Truth Data Comparison (Optional)
+
+For validation studies, the pipeline outputs can be compared against WGS truth data:
+
+```
+Recommended Validation Workflow:
+────────────────────────────────
+1. Obtain WGS truth data for subset of samples
+   • HGDP-1KG high-coverage WGS (~4000 samples)
+   • Study-specific WGS (if available)
+
+2. Match variants between imputed and WGS data
+   • bcftools isec for intersection
+   • Ensure consistent variant IDs (chr:pos:ref:alt)
+
+3. Calculate concordance metrics
+   • Genotype concordance (GT match rate)
+   • Dosage R² (correlation of imputed dosage vs truth)
+   • Non-reference concordance (for rare variants)
+
+4. Stratify by:
+   • MAF bins (0-0.01, 0.01-0.05, 0.05-0.5)
+   • Ancestry group (from GRAF-anc)
+   • Imputation server (TOPMed vs All of Us)
+
+5. Compare MagicalRsq-X calibration
+   • Pre-filter INFO/R² threshold selection
+   • Post-filter variant retention
+```
+
+Key metrics for publication:
+| Metric | Description | Expected Range |
+|--------|-------------|----------------|
+| Dosage R² | Correlation with WGS dosage | >0.9 (common), >0.7 (low-freq) |
+| Concordance | Exact genotype match | >95% overall |
+| NRC | Non-reference concordance | >90% for MAF >1% |
+| Variant Yield | Variants passing QC | ~8-40M depending on MAF |
 
 ---
 
@@ -762,20 +919,32 @@ params {
     topmed_password             = null
     monitor_interval_minutes    = 45
 
+    // MagicalRsq-X Configuration
+    magicalrsqx_dir             = '/opt/MagicalRsqX'          // Container path
+    magicalrsqx_models          = '/opt/MagicalRsqX/models'   // Pre-trained XGBoost models
+    primary_ancestry            = 'EUR'                       // Model selection: EUR, AFR, AMR, EAS
+    magicalrsq_threshold        = 0.3                         // R² filter threshold
+
     // QC Thresholds
-    magicalrsq_threshold        = 0.3
     sample_call_rate            = 0.95
     variant_call_rate           = 0.95
-    hwe_pvalue                  = 1e-6
+    skip_hwe                    = true       // Skip HWE filtering (recommended for admixed)
+    hwe_pvalue                  = 1e-6       // HWE threshold if skip_hwe=false
     het_sd_threshold            = 3
     kinship_threshold           = 0.177
     use_genesis                 = true
+    n_pcs                       = 15         // Number of PCs to calculate
+    maf_threshold               = 0.01       // MAF filter for GWAS output
 
-    // Ancestry
-    admixture_k                 = '5,6,7'
+    // Ancestry - Global
+    admixture_k_min             = 5          // ADMIXTURE K range start
+    admixture_k_max             = 7          // ADMIXTURE K range end
+    admixture_cv_folds          = 5          // Cross-validation folds
+
+    // Ancestry - Local (LAI)
     run_lai                     = false
-    lai_methods                 = 'rfmix2'
-    reference_panel             = 'resources/ancestry_references/reference_panel.rds'
+    lai_methods                 = 'rfmix2'   // Options: rfmix2, rfmix1, flare, gnomix
+    lai_reference               = 'resources/ancestry_references/lai_reference'
     genetic_map_dir             = 'resources/genetic_maps'
 }
 ```
