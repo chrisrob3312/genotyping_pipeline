@@ -121,7 +121,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 1/4: Downloading Sample Metadata ==="
+echo "=== 1/5: Downloading Sample Metadata ==="
 echo ""
 
 cd sample_info
@@ -182,7 +182,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 2/4: Downloading Genotype Array Data ==="
+echo "=== 2/5: Downloading Genotype Array Data ==="
 echo ""
 
 cd genotypes
@@ -248,7 +248,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 3/4: Downloading WGS Truth Data ==="
+echo "=== 3/5: Downloading WGS Truth Data ==="
 echo ""
 
 cd wgs_truth
@@ -297,7 +297,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 4/4: Creating Benchmark Sample Sheets ==="
+echo "=== 4/5: Creating Benchmark Sample Sheets ==="
 echo ""
 
 # Create sample sheet for full benchmark
@@ -319,6 +319,75 @@ platform_id,batch_id,input_path,file_type,build,file_structure
 EOF
 
 echo "  Created benchmark_sample_sheet_quick.csv"
+
+cd "${OUTPUT_DIR}"
+
+# =============================================================================
+# 5. SIMULATE PHENOTYPES FOR GWAS/PRS TESTING
+# =============================================================================
+
+echo ""
+echo "=== 5/5: Simulating Phenotypes for GWAS/PRS Testing ==="
+echo ""
+
+mkdir -p phenotypes
+
+# Check if WGS truth VCF exists for phenotype simulation
+WGS_VCF=$(ls wgs_truth/CCDG_*_chr22*.vcf.gz 2>/dev/null | head -1 || true)
+
+if [ -n "$WGS_VCF" ] && [ -f "$WGS_VCF" ]; then
+    echo "  Using WGS truth for phenotype simulation: $(basename $WGS_VCF)"
+
+    # Check if R and required packages are available
+    if command -v Rscript &> /dev/null; then
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+        # Simulate height (continuous trait, ~50% heritable)
+        echo "  Simulating HEIGHT phenotype..."
+        Rscript "${SCRIPT_DIR}/bench-helper-scripts/simulate_phenotypes.R" \
+            --vcf "$WGS_VCF" \
+            --trait height \
+            --h2 0.5 \
+            --output phenotypes/height_simulated \
+            2>/dev/null || echo "    (Skipped - missing R packages)"
+
+        # Simulate T2D (binary trait, tests ancestry-specific effects)
+        echo "  Simulating T2D phenotype..."
+        Rscript "${SCRIPT_DIR}/bench-helper-scripts/simulate_phenotypes.R" \
+            --vcf "$WGS_VCF" \
+            --trait t2d \
+            --h2 0.4 \
+            --prevalence 0.1 \
+            --output phenotypes/t2d_simulated \
+            2>/dev/null || echo "    (Skipped - missing R packages)"
+
+        # Simulate LDL (tests rare variant detection)
+        echo "  Simulating LDL phenotype..."
+        Rscript "${SCRIPT_DIR}/bench-helper-scripts/simulate_phenotypes.R" \
+            --vcf "$WGS_VCF" \
+            --trait ldl \
+            --h2 0.3 \
+            --output phenotypes/ldl_simulated \
+            2>/dev/null || echo "    (Skipped - missing R packages)"
+
+        if [ -f "phenotypes/height_simulated.pheno" ]; then
+            echo "  Created simulated phenotypes:"
+            echo "    - phenotypes/height_simulated.pheno (continuous)"
+            echo "    - phenotypes/t2d_simulated.pheno (binary)"
+            echo "    - phenotypes/ldl_simulated.pheno (continuous)"
+            echo "    - *_causal_variants.txt (for hit recovery testing)"
+        fi
+    else
+        echo "  Rscript not found - skipping phenotype simulation"
+        echo "  Run manually: Rscript bench-helper-scripts/simulate_phenotypes.R --help"
+    fi
+else
+    echo "  WGS truth not found - skipping phenotype simulation"
+    echo "  Download WGS data first, then run:"
+    echo "    Rscript bench-helper-scripts/simulate_phenotypes.R --vcf <wgs.vcf.gz> --trait height"
+fi
+
+cd "${OUTPUT_DIR}"
 
 # =============================================================================
 # CREATE SUMMARY
@@ -345,6 +414,12 @@ sample_info/
 ├── integrated_call_samples.panel  # Sample metadata
 ├── superpopulations.txt           # Population definitions
 └── samples_*.txt                  # Per-superpopulation sample lists
+
+phenotypes/                        # Simulated phenotypes for GWAS/PRS testing
+├── height_simulated.pheno         # Height (continuous, h2=0.5)
+├── t2d_simulated.pheno            # Type 2 Diabetes (binary, h2=0.4)
+├── ldl_simulated.pheno            # LDL cholesterol (continuous, h2=0.3)
+└── *_causal_variants.txt          # Known causal variants for hit recovery
 
 
 Sample Counts by Superpopulation:
@@ -376,6 +451,20 @@ Usage:
        --imputed results/approach_a/final.vcf.gz \\
        --truth wgs_truth/CCDG_*_chr22.vcf.gz \\
        --output results/concordance_approach_a.txt
+
+4. Run GWAS with simulated phenotypes:
+
+   plink2 --bfile imputed_data \\
+       --pheno phenotypes/height_simulated.pheno \\
+       --glm \\
+       --out gwas_height
+
+5. Check causal variant recovery:
+
+   Rscript benchmarking/bench-helper-scripts/check_hit_recovery.R \\
+       --gwas gwas_height.glm.linear \\
+       --causal phenotypes/height_simulated_causal_variants.txt \\
+       --output hit_recovery_height
 
 
 Notes:
