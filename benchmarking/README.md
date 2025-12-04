@@ -1,257 +1,372 @@
-# Benchmarking Framework
+# Benchmarking Imputation Approaches
 
-Comprehensive benchmarking to compare imputation strategies across ancestry groups for mixed-ancestry cohorts.
+## Literature Background
 
-## Overview
+Our benchmarking framework is based on key findings from these studies:
 
-This framework compares **6 imputation approaches** across **3 imputation servers** using publicly available data with WGS truth for validation.
+### Key References
 
-## Approaches Compared
+1. **Southam et al. 2011** (Eur J Hum Genet)
+   - "The effect of genome-wide association scan quality control on imputation outcome"
+   - Found that stringent pre-imputation QC can REDUCE imputation quality
+   - Recommends minimal QC before imputation, thorough QC after
+   - DOI: [10.1038/ejhg.2010.242](https://doi.org/10.1038/ejhg.2010.242)
 
-### Traditional Approaches (Shell Scripts)
+2. **Charon et al. 2021** (Scientific Reports)
+   - "Impact of pre- and post-variant filtration strategies on imputation"
+   - Systematic comparison of QC timing strategies
+   - Confirms post-imputation filtering often superior
+   - DOI: [10.1038/s41598-021-85333-z](https://doi.org/10.1038/s41598-021-85333-z)
 
-| Approach | QC Timing | Merge Strategy | Description |
-|----------|-----------|----------------|-------------|
-| **A** | Before imputation | Intersect before | Traditional: Thorough QC → Intersect → Impute → R² filter |
-| **B** | After imputation | Intersect after | Minimal prep → Impute → Intersect → Thorough QC after |
-| **C** | Before imputation | Separate platforms | Thorough QC → Impute each platform separately → Merge after |
-| **D** | After imputation | Separate platforms | Minimal prep → Impute each separately → Thorough QC → Merge |
+3. **Preprint 2024** (bioRxiv)
+   - Updates on imputation strategies for diverse populations
+   - DOI: [10.1101/2024.04.19.24306081](https://doi.org/10.1101/2024.04.19.24306081)
 
-### Our Pipeline Variants
+4. **Verma et al. 2014** (Frontiers in Genetics)
+   - "Imputation and quality control steps for combining multiple genome-wide datasets"
+   - Early workflow for multi-platform merging
+   - **Note:** Pre-dates diversity-aware tools (MagicalRsq-X, diverse panels)
+   - DOI: [10.3389/fgene.2014.00370](https://doi.org/10.3389/fgene.2014.00370)
 
-| Approach | QC Timing | Merge Strategy | Description |
-|----------|-----------|----------------|-------------|
-| **E (Ours-1step)** | After imputation | Union within platform | Union merge → Impute → Intersect merge → MagicalRsq-X → Thorough QC |
-| **F (Ours-2step)** | After imputation | Union + re-impute | Union merge → Impute → Intersect merge → Re-impute → MagicalRsq-X → Thorough QC |
+---
 
-### Key Differences in Our Pipeline
+## Benchmark Matrix
+
+### 6 Approaches × 3 Servers = 18 Combinations
 
 ```
-TRADITIONAL (Approach A):
-  Intersect across platforms → Thorough QC → Impute → R² filter (0.3 or 0.8)
-  ❌ Loses platform-specific variants before imputation
-  ❌ HWE/MAF filters remove valid admixed population variants
-  ❌ Static R² threshold not calibrated for ancestry
-
-OUR PIPELINE (Approach E/F):
-  Union merge within platform → Minimal QC → Impute → Intersect merge →
-  [Optional: Re-impute] → MagicalRsq-X filter → Thorough QC
-  ✓ Preserves all platform variants until after imputation
-  ✓ QC after imputation catches true errors, not population structure
-  ✓ MagicalRsq-X provides ancestry-calibrated quality scores
-  ✓ 2-step imputation recovers variants lost in intersect merge
+              TOPMed    AllOfUs   Michigan_1KG
+Approach A      ✓         ✓           ✓
+Approach B      ✓         ✓           ✓
+Approach C      ✓         ✓           ✓
+Approach D      ✓         ✓           ✓
+Approach E      ✓         ✓           ✓
+Approach F      ✓         ✓           ✓
 ```
 
-## Imputation Servers Tested
+---
 
-| Server | Reference Panel | Notes |
-|--------|-----------------|-------|
-| Michigan Imputation Server | 1000 Genomes Phase 3 | Baseline comparison |
-| TOPMed Imputation Server | TOPMed Freeze 10 | ~97K samples, diverse |
-| All of Us AnVIL | All of Us WGS | ~245K samples, diverse |
+## Approach Definitions
 
-## Test Data Sources
+### Traditional Approaches (A-D)
 
-### Genotype Array Data (Input)
-- **1000 Genomes** Omni 2.5M array data (public)
-- Multiple ancestry groups: AFR, EUR, EAS, AMR, SAS
-- ~2500 samples with matched WGS
+| Approach | Name | QC Timing | Merge Strategy | Based On |
+|----------|------|-----------|----------------|----------|
+| **A** | Stringent QC-Before | Before imputation | Per-platform, then intersect | Traditional practice |
+| **B** | Minimal QC-Before | Before imputation | Per-platform, then intersect | Southam 2011 |
+| **C** | Intersect-First | Before imputation | Intersect first, then QC | Common practice |
+| **D** | Intersect → QC-After | After merge/imputation | Intersect, merge, then QC after | Charon 2021 / Verma 2014 |
 
-### WGS Truth Data (Validation)
-- **HGDP-1KG High-Coverage WGS** (NYGC, ~30x)
-- **1000 Genomes 30x WGS** (public)
-- Matched samples for concordance calculation
+### Our Pipeline Approaches (E-F)
 
-## Metrics Calculated
+| Approach | Name | Strategy | Key Features |
+|----------|------|----------|--------------|
+| **E** | Ours 1-Step | Union → Impute → MagicalRsq-X → QC | Single imputation pass |
+| **F** | Ours 2-Step | Union → Impute → Intersect → Re-impute → MagicalRsq-X → QC | Two imputation passes |
 
-### 1. Variant-Level Imputation Quality
+---
 
-| Metric | Description | Stratification |
-|--------|-------------|----------------|
-| INFO/R² Score | Imputation accuracy estimate | MAF, ancestry, functional category |
-| MagicalRsq-X | Ancestry-calibrated quality | Ancestry-specific models |
-| Variant Retention | % variants passing QC | MAF bin, ancestry |
-| Imputation Rate | % variants successfully imputed | Platform, ancestry |
+## Imputation Servers
 
-### 2. Concordance with WGS Truth
+| Server | Panel | Samples | Best For | Automation |
+|--------|-------|---------|----------|------------|
+| **TOPMed** | TOPMed r2 | ~97K | Diverse/admixed | imputationbot |
+| **All of Us** | TOPMed-based | ~245K | Latino, AFR-AMR | terralab |
+| **Michigan 1KG** | 1000G Phase 3 | ~2.5K | Quick baseline | imputationbot |
 
-| Metric | Description | Expected (Common) | Expected (Rare) |
-|--------|-------------|-------------------|-----------------|
-| Genotype Concordance | Exact GT match rate | >98% | >90% |
-| Dosage R² | Correlation of dosage with truth | >0.95 | >0.70 |
-| Non-Reference Concordance | Alt allele accuracy | >95% | >85% |
-| Heterozygote Concordance | Het call accuracy | >95% | >80% |
+**Note:** Michigan HRC excluded as EUR-focused panel inappropriate for diverse cohorts.
 
-### 3. Cross-Platform Reproducibility
-- Genotype concordance for samples typed on multiple arrays
-- Dosage correlation across platforms post-imputation
-- Platform-specific variant bias detection
+---
 
-### 4. Association/PRS Performance
-| Metric | Description | Stratification |
-|--------|-------------|----------------|
-| Effect Size Bias | Deviation from expected β | Ancestry, MAF |
-| Lambda (λ GC) | Genomic inflation factor | Ancestry |
-| Power | % known GWAS hits recovered | Ancestry, trait |
-| PRS R² | Variance explained by PRS | Ancestry group |
-| PRS AUC | Discriminative ability | Ancestry group |
+## Detailed Approach Workflows
 
-### 5. Ancestry-Aware Metrics
-| Metric | Description | Notes |
-|--------|-------------|-------|
-| Global Ancestry Quality | INFO by GRAF-anc group | 8 major + 50 subgroups |
-| Local Ancestry Quality | INFO by LAI tract ancestry | Per-chromosome segments |
-| Ancestry-Specific Allele Freq | AF bias by ancestry | Compare to gnomAD |
-| LAI-Aware PRS | Tractor framework performance | Ancestry-specific effects |
+### Approach A: Stringent QC-Before (Traditional)
 
-### 6. Stratification Dimensions
-- **MAF bins:** 0-0.1%, 0.1-0.5%, 0.5-1%, 1-5%, 5-50%
-- **Global ancestry:** AFR, EUR, EAS, SAS, AMR, MEN, OCN, MIX (GRAF-anc)
-- **Local ancestry:** AFR, EUR, NAT tracts (from RFMix2/FLARE)
-- **Functional category:** Exonic, intronic, intergenic, GWAS catalog
-- **Chromosome:** Per-chromosome consistency check
+**Philosophy:** Clean data thoroughly before imputation
+**Critique:** May remove valid variants in admixed populations
 
-### 7. Computational Metrics
-| Metric | Description |
-|--------|-------------|
-| Wall-clock time | Total runtime |
-| CPU hours | Computational cost |
-| Peak memory | Maximum RAM usage |
-| Storage | Disk space required |
-| I/O operations | Read/write load |
+```
+Per Platform:
+├── MAF > 1% filter (removes rare variants)
+├── HWE p < 1e-6 filter (may remove admixed structure)
+├── Variant call rate > 98%
+├── Sample call rate > 98%
+├── Heterozygosity ± 3 SD
+└── Relatedness filter (pi-hat > 0.25)
+        ↓
+[Intersect across platforms]
+        ↓
+[Submit to Imputation Server]
+        ↓
+[Simple R² > 0.3 filter]
+        ↓
+Final Output
+```
 
-## Publication Figures
+### Approach B: Minimal QC-Before (Southam 2011 Recommendation)
 
-### Main Figures
+**Philosophy:** Let imputation handle variant filtering; QC after
+**Based on:** Southam finding that stringent pre-QC hurts imputation quality
 
-| Figure | Content | Type |
-|--------|---------|------|
-| **Fig 1** | Pipeline overview flowchart | Schematic |
-| **Fig 2** | Concordance by MAF × Ancestry (heatmap) | Heatmap |
-| **Fig 3** | INFO/R² distributions by approach | Violin/Box |
-| **Fig 4A** | Local ancestry–specific imputation quality | Heatmap (ancestry × MAF) |
-| **Fig 4B** | INFO difference by LAI tracts | Violin plot |
-| **Fig 4C** | PRS R²/AUC by ancestry group | Barplot |
-| **Fig 5A** | GWAS Manhattan plots comparison | Manhattan |
-| **Fig 5B** | QQ plots showing inflation | QQ plot |
-| **Fig 5C** | % known GWAS hits by ancestry | Barplot |
-| **Fig 6** | Computational efficiency comparison | Scatter/Bar |
+```
+Per Platform:
+├── Variant call rate > 90% only
+├── Sample call rate > 90% only
+└── Extreme outliers only
+        ↓
+[Intersect across platforms]
+        ↓
+[Submit to Imputation Server]
+        ↓
+[Thorough Post-Imputation QC]
+├── R² > 0.3 filter
+├── MAF filter (if desired)
+├── HWE filter
+├── Call rate filters
+└── Relatedness
+        ↓
+Final Output
+```
 
-### Supplementary Tables
+### Approach C: Intersect-First
 
-| Table | Content |
-|-------|---------|
-| **S1** | Variant inclusion/exclusion summary per array |
-| **S2** | Per-chromosome variant counts and R² distributions |
-| **S3** | Per-ancestry imputation quality metrics |
-| **S4** | Correlation between global ancestry and imputation accuracy |
-| **S5** | Standard INFO vs MagicalRsq-X filtering comparison |
-| **S6** | Computational resource summary by approach |
-| **S7** | Cross-platform reproducibility metrics |
-| **S8** | Functional annotation enrichment by ancestry |
+**Philosophy:** Ensure all platforms have identical variants before any processing
+**Critique:** Loses platform-specific variants that could be informative
+
+```
+Platform 1 ─┐
+Platform 2 ─┼─→ [Find Common Variants First]
+Platform 3 ─┘           ↓
+                [Apply QC to common variants]
+                ├── Standard QC filters
+                └── Per-platform sample QC
+                        ↓
+                [Merge all platforms]
+                        ↓
+                [Submit to Imputation Server]
+                        ↓
+                [Post-QC]
+                        ↓
+                Final Output
+```
+
+### Approach D: Intersect → Merge → QC-After (Verma/Charon style)
+
+**Philosophy:** Intersect for consistency, but delay QC until after imputation
+**Based on:** Verma 2014 workflow + Charon 2021 QC timing findings
+
+```
+Platform 1 ─┐
+Platform 2 ─┼─→ [Find Common Variants]
+Platform 3 ─┘           ↓
+                [Minimal per-platform QC]
+                ├── Call rate only
+                └── Extreme outliers
+                        ↓
+                [Merge all samples]
+                        ↓
+                [Submit to Imputation Server]
+                        ↓
+                [THOROUGH Post-Imputation QC] ← Key from Charon 2021
+                ├── R² or MagicalRsq-X filter
+                ├── MAF filter
+                ├── HWE filter (cautious in admixed)
+                ├── Call rate filters
+                └── Relatedness (GENESIS preferred)
+                        ↓
+                Final Output
+```
+
+### Approach E: Our Pipeline (1-Step)
+
+**Philosophy:** Preserve all variants, use ancestry-aware tools, QC after imputation
+**Key innovations:** Union merge, MagicalRsq-X, skip HWE for admixed
+
+```
+Platform 1 ─┐
+Platform 2 ─┼─→ [UNION Merge - Keep ALL Variants]
+Platform 3 ─┘           ↓
+                [Minimal QC]
+                ├── Basic call rate
+                └── Strand check
+                        ↓
+                [Submit to Imputation Server]
+                        ↓
+                [MagicalRsq-X Filter] ← Ancestry-calibrated
+                        ↓
+                [Thorough Post-QC]
+                ├── Call rate filters
+                ├── Skip HWE for admixed populations
+                └── GENESIS PCRelate (handles admixture)
+                        ↓
+                Final Output
+```
+
+### Approach F: Our Pipeline (2-Step)
+
+**Philosophy:** Same as E, plus re-imputation to recover variants lost in merge
+**Rationale:** Second imputation pass on merged data fills gaps
+
+```
+Platform 1 ─┐
+Platform 2 ─┼─→ [UNION Merge]
+Platform 3 ─┘       ↓
+              [Minimal QC]
+                    ↓
+              [Submit to Server - Pass 1]
+                    ↓
+              [Intersect Merge across platforms]
+                    ↓
+              [Submit to Server - Pass 2] ← Re-imputation
+                    ↓
+              [MagicalRsq-X Filter]
+                    ↓
+              [Thorough Post-QC]
+                    ↓
+              Final Output
+```
+
+---
+
+## Why Traditional Approaches May Fail for Diverse Populations
+
+| Issue | Traditional Impact | Our Solution |
+|-------|-------------------|--------------|
+| **HWE filtering before imputation** | Removes real variants in admixed populations | Skip HWE or apply after, cautiously |
+| **MAF filtering before imputation** | Loses rare population-specific variants | No MAF filter before imputation |
+| **Static R² threshold** | Penalizes non-EUR ancestry | MagicalRsq-X ancestry-calibrated |
+| **Intersect merge** | Loses platform-unique variants | Union merge preserves all |
+| **PLINK relatedness** | Assumes homogeneous population | GENESIS PCRelate handles admixture |
+| **EUR-focused panels** | Poor imputation for AFR/AMR | TOPMed/All of Us diverse panels |
+
+---
+
+## Expected Outcomes
+
+Based on literature and panel composition:
+
+| Ancestry | Best Traditional | Our Pipeline Advantage |
+|----------|-----------------|----------------------|
+| **EUR** | B or D | Slight improvement |
+| **AFR** | B or D | Significant improvement |
+| **AMR** | B or D | Major improvement (Latino/NAT) |
+| **Admixed** | D | Major improvement |
+| **Rare variants** | Poor all | Better with TOPMed |
+
+---
+
+## Running the Full Matrix
+
+```bash
+# Setup credentials (see SETUP_IMPUTATIONBOT.md)
+export TOPMED_TOKEN="your_token"
+export MICHIGAN_TOKEN="your_token"
+terralab login  # For All of Us
+
+# Run full matrix (18 combinations)
+./run_full_benchmark_matrix.sh \
+    --input benchmarking/test_data \
+    --output benchmark_results \
+    --servers "topmed,allofus,michigan_1kg"
+
+# Or run specific approaches
+./run_full_benchmark_matrix.sh \
+    --input test_data \
+    --approaches "A,B,E,F" \
+    --servers "topmed,allofus"
+```
+
+---
 
 ## Directory Structure
 
 ```
 benchmarking/
-├── README.md                      # This file
-├── download_benchmark_data.sh     # Download public test data + WGS truth
-├── run_all_benchmarks.sh          # Master script to run all approaches
+├── README.md                          # This file
+├── SETUP_IMPUTATIONBOT.md            # Credential setup guide
+├── GWAS_SIMULATION_GUIDE.md          # Phenotype simulation
 │
-├── alternative_approaches/        # Shell script pipelines (Traditional)
-│   ├── approach_a_michigan.sh     # A: QC before + Intersect + Michigan/1KG
-│   ├── approach_a_topmed.sh       # A: QC before + Intersect + TOPMed
-│   ├── approach_a_allofus.sh      # A: QC before + Intersect + All of Us
-│   ├── approach_b_topmed.sh       # B: QC after + Intersect + TOPMed
-│   ├── approach_c_topmed.sh       # C: QC before + Separate platforms + TOPMed
-│   ├── approach_d_topmed.sh       # D: QC after + Separate platforms + TOPMed
-│   └── common_functions.sh        # Shared QC/processing functions
+├── download_benchmark_data.sh         # Download 1KG test data
+├── download_gwas_sumstats.sh          # Download GWAS data
+├── simulate_gwas_phenotypes.sh        # Simulate phenotypes
+├── run_all_benchmarks.sh              # Simple benchmark runner
+├── run_full_benchmark_matrix.sh       # Full 18-combination matrix
 │
-├── our_pipeline_variants/         # Our pipeline test configurations
-│   ├── ours_1step_topmed.config   # E: Union + 1 imputation + MagicalRsq-X
-│   ├── ours_1step_allofus.config  # E: Union + 1 imputation + MagicalRsq-X
-│   ├── ours_2step_topmed.config   # F: Union + 2-step imputation + MagicalRsq-X
-│   └── ours_2step_allofus.config  # F: Union + 2-step imputation + MagicalRsq-X
+├── alternative_approaches/            # Traditional approach scripts
+│   ├── approach_a_topmed.sh          # A × TOPMed
+│   ├── approach_a_allofus.sh         # A × All of Us
+│   ├── approach_a_michigan_1kg.sh    # A × Michigan 1KG
+│   ├── approach_b_topmed.sh          # B × TOPMed
+│   ├── approach_b_allofus.sh         # B × All of Us
+│   ├── approach_b_michigan_1kg.sh    # B × Michigan 1KG
+│   ├── approach_c_*.sh               # C variants
+│   ├── approach_d_*.sh               # D variants
+│   └── common_functions.sh           # Shared functions
 │
-├── bench-helper-scripts/          # Comparison and metrics scripts
-│   ├── calculate_concordance.R    # Calculate concordance with WGS
-│   ├── stratify_by_ancestry.R     # Stratify metrics by GRAF-anc groups
-│   ├── compare_approaches.R       # Compare all approaches
-│   ├── generate_benchmark_report.R # Generate final report
-│   ├── plot_metrics.R             # Visualization scripts
-│   └── extract_timing_metrics.sh  # Extract computational metrics
+├── our_pipeline_variants/             # Our pipeline configs
+│   ├── ours_1step_topmed.config      # E × TOPMed
+│   ├── ours_1step_allofus.config     # E × All of Us
+│   ├── ours_1step_michigan_1kg.config # E × Michigan 1KG
+│   ├── ours_2step_topmed.config      # F × TOPMed
+│   ├── ours_2step_allofus.config     # F × All of Us
+│   └── ours_2step_michigan_1kg.config # F × Michigan 1KG
 │
-├── modules/                       # Nextflow modules for benchmarking
-│   ├── Benchmark_Concordance.nf   # Calculate concordance metrics
-│   ├── Benchmark_Compare.nf       # Compare approaches
-│   └── Benchmark_Report.nf        # Generate reports
+├── bench-helper-scripts/              # Analysis scripts
+│   ├── calculate_concordance.R
+│   ├── compare_approaches.R
+│   ├── compare_rvas_approaches.R
+│   ├── benchmark_rare_variants.R
+│   ├── generate_publication_figures.R
+│   ├── summarize_benchmark_timings.R
+│   ├── simulate_phenotypes.R
+│   ├── simulate_ancestry_aware_phenotypes.R
+│   ├── simulate_lai_phenotypes.R
+│   ├── check_hit_recovery.R
+│   ├── calculate_lai_metrics.R
+│   └── extract_timing_metrics.sh
 │
-├── test_data/                     # Downloaded test data
-│   ├── genotypes/                 # Array genotype data
-│   ├── wgs_truth/                 # WGS truth data
-│   └── sample_info/               # Sample metadata + ancestry
-│
-└── results/                       # Benchmark results
-    ├── approach_a_michigan/
-    ├── approach_a_topmed/
-    ├── approach_a_allofus/
-    ├── ...
-    ├── our_pipeline_topmed/
-    ├── our_pipeline_allofus/
-    └── comparison_report/
+└── test_data/                         # Downloaded data
+    ├── genotypes/
+    ├── wgs_truth/
+    ├── phenotypes/
+    └── sample_info/
 ```
 
-## Quick Start
+---
 
-```bash
-# 1. Download benchmark data (genotypes + WGS truth)
-./benchmarking/download_benchmark_data.sh -o ./benchmarking/test_data
+## Metrics Calculated
 
-# 2. Run GRAF-anc to classify samples by ancestry
-nextflow run modules/Module7_Ancestry.nf \
-    --input_plink benchmarking/test_data/genotypes/1kg_omni \
-    --run_grafanc_only true \
-    --outdir benchmarking/test_data/sample_info
+### Imputation Quality
+- INFO/R² by MAF bin and ancestry
+- MagicalRsq-X scores
+- Variant retention rates
 
-# 3. Run all benchmark approaches
-./benchmarking/run_all_benchmarks.sh
+### Concordance with WGS Truth
+- Genotype concordance (exact match)
+- Dosage R² (correlation)
+- Non-reference concordance
+- By MAF × ancestry stratification
 
-# 4. Generate comparison report
-Rscript benchmarking/bench-helper-scripts/generate_benchmark_report.R
-```
+### GWAS/PRS Performance
+- GWAS hit recovery rate
+- Effect size correlation with published
+- PRS R² by ancestry
+- Power comparison
 
-## Data Requirements
+### Computational
+- Wall-clock time per step
+- Total pipeline time
+- Variants per minute efficiency
 
-| Data Type | Size | Source |
-|-----------|------|--------|
-| 1KG Omni genotypes | ~5GB | EBI/NCBI |
-| 1KG 30x WGS (chr subset) | ~50GB | IGSR |
-| HGDP-1KG WGS (if available) | ~100GB | NYGC |
+---
 
-## Expected Outputs
+## Citations
 
-1. **Concordance tables** per approach × server × ancestry
-2. **Timing comparison** across approaches
-3. **Variant yield comparison**
-4. **Publication-ready figures**:
-   - Concordance by MAF × ancestry (heatmap)
-   - Approach comparison (bar plots)
-   - Computational efficiency (scatter)
+If using this framework, please cite:
 
-## GWAS Validation (Optional)
-
-For GWAS replication to demonstrate improvement:
-1. Use UK Biobank summary statistics (public)
-2. Compare effect size concordance
-3. Focus on:
-   - Rare variant associations
-   - Trans-ancestry meta-analysis traits
-   - Admixed population-specific signals
-
-## References
-
-- TOPMed Imputation Server: https://imputation.biodatacatalyst.nhlbi.nih.gov/
-- Michigan Imputation Server: https://imputationserver.sph.umich.edu/
-- All of Us AnVIL: https://anvil.terra.bio/
-- 1000 Genomes: https://www.internationalgenome.org/
-- HGDP-1KG: https://gnomad.broadinstitute.org/news/2020-10-gnomad-v3-1-new-content-methods-annotations-and-data-availability/
+1. Southam L et al. (2011) Eur J Hum Genet. DOI: 10.1038/ejhg.2010.242
+2. Charon C et al. (2021) Sci Rep. DOI: 10.1038/s41598-021-85333-z
+3. Verma SS et al. (2014) Front Genet. DOI: 10.3389/fgene.2014.00370
+4. Sun Q et al. (2024) AJHG - MagicalRsq-X
+5. TOPMed Imputation Reference Panel
+6. [Your pipeline citation]

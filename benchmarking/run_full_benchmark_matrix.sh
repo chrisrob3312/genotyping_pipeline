@@ -4,21 +4,22 @@
 #
 # Runs ALL approach × server combinations for comprehensive benchmarking.
 #
-# APPROACHES (6):
-#   A - Traditional QC-before-imputation
-#   B - Traditional QC-before (alternate implementation)
-#   C - Intersect-first + QC
-#   D - Per-platform QC + intersect
-#   E - Our pipeline 1-step (union → impute → merge → QC)
-#   F - Our pipeline 2-step (union → impute → merge → re-impute → QC)
+# APPROACHES (6) - based on literature:
+#   A - Stringent QC-Before (traditional practice)
+#   B - Minimal QC-Before (Southam 2011 recommendation)
+#   C - Intersect-First + QC-Before (common practice)
+#   D - Intersect → QC-After (Verma 2014 / Charon 2021)
+#   E - Our pipeline 1-step (union → impute → MagicalRsq-X → QC)
+#   F - Our pipeline 2-step (union → impute → merge → re-impute → MagicalRsq-X → QC)
 #
-# SERVERS (4):
-#   topmed   - TOPMed Imputation Server (TOPMed r2 panel)
-#   allofus  - All of Us AnVIL (TOPMed-based, diverse)
-#   michigan_hrc - Michigan with HRC panel (EUR-focused)
-#   michigan_1kg - Michigan with 1000G Phase 3 (global)
+# SERVERS (3):
+#   topmed     - TOPMed Imputation Server (~97K diverse samples)
+#   allofus    - All of Us AnVIL (~245K, Latino/AFR-AMR focus)
+#   michigan_1kg - Michigan with 1000G Phase 3 (~2.5K, global baseline)
 #
-# TOTAL COMBINATIONS: 6 approaches × 4 servers = 24 benchmark runs
+# Note: Michigan HRC excluded as EUR-focused panel inappropriate for diverse cohorts.
+#
+# TOTAL COMBINATIONS: 6 approaches × 3 servers = 18 benchmark runs
 #
 # Uses imputationbot for automated submission to Michigan and TOPMed.
 #
@@ -61,24 +62,23 @@ ALLOFUS_AUTHENTICATED=false
 # All approaches
 APPROACHES=("A" "B" "C" "D" "E" "F")
 
-# All servers
-SERVERS=("topmed" "allofus" "michigan_hrc" "michigan_1kg")
+# All servers (3 - excluding michigan_hrc as EUR-focused, inappropriate for diverse cohorts)
+SERVERS=("topmed" "allofus" "michigan_1kg")
 
-# Approach descriptions
+# Approach descriptions (based on literature)
 declare -A APPROACH_DESC
-APPROACH_DESC[A]="Traditional QC-before + single imputation"
-APPROACH_DESC[B]="Traditional QC-before (strict thresholds)"
-APPROACH_DESC[C]="Intersect-first + QC + imputation"
-APPROACH_DESC[D]="Per-platform QC + intersect + imputation"
-APPROACH_DESC[E]="Our pipeline: 1-step (union → impute → merge → MagicalRsq-X)"
-APPROACH_DESC[F]="Our pipeline: 2-step (union → impute → merge → re-impute → MagicalRsq-X)"
+APPROACH_DESC[A]="Stringent QC-Before (traditional practice)"
+APPROACH_DESC[B]="Minimal QC-Before (Southam 2011)"
+APPROACH_DESC[C]="Intersect-First + QC-Before (common practice)"
+APPROACH_DESC[D]="Intersect → QC-After (Verma 2014 / Charon 2021)"
+APPROACH_DESC[E]="Our pipeline: 1-step (union → impute → MagicalRsq-X → QC)"
+APPROACH_DESC[F]="Our pipeline: 2-step (union → impute → merge → re-impute → MagicalRsq-X → QC)"
 
 # Server descriptions
 declare -A SERVER_DESC
-SERVER_DESC[topmed]="TOPMed Imputation Server (r2 panel, diverse)"
-SERVER_DESC[allofus]="All of Us AnVIL (TOPMed-based, 50%+ non-EUR)"
-SERVER_DESC[michigan_hrc]="Michigan with HRC (EUR-focused, largest)"
-SERVER_DESC[michigan_1kg]="Michigan with 1000G Phase 3 (global diversity)"
+SERVER_DESC[topmed]="TOPMed Imputation Server (r2 panel, ~97K diverse samples)"
+SERVER_DESC[allofus]="All of Us AnVIL (TOPMed-based, ~245K, Latino/AFR-AMR focus)"
+SERVER_DESC[michigan_1kg]="Michigan with 1000G Phase 3 (~2.5K, global baseline)"
 
 # =============================================================================
 # Parse Arguments
@@ -438,39 +438,81 @@ run_benchmark() {
     step_start=$(date +%s)
     log "  Step 1: Pre-processing (${approach})..."
 
+    # Construct script name: approach_{a-d}_{server}.sh
+    local script_name="approach_${approach,,}_${server}.sh"
+    local script_path="${SCRIPT_DIR}/alternative_approaches/${script_name}"
+
     case "$approach" in
-        A|B)
-            # Traditional QC-before
-            run_cmd "${SCRIPT_DIR}/alternative_approaches/approach_a_topmed.sh \
-                --input '${INPUT_PLINK}' \
-                --output '${run_dir}/prep' \
-                --threads ${THREADS} \
-                2>&1 || true"
+        A)
+            # Stringent QC-before
+            if [[ -f "$script_path" ]]; then
+                run_cmd "${script_path} \
+                    --input '${INPUT_PLINK}' \
+                    --output '${run_dir}/prep' \
+                    --threads ${THREADS} \
+                    2>&1 || true"
+            else
+                log "    WARNING: Script not found: ${script_path}"
+            fi
+            ;;
+        B)
+            # Minimal QC-before (Southam 2011)
+            if [[ -f "$script_path" ]]; then
+                run_cmd "${script_path} \
+                    --input '${INPUT_PLINK}' \
+                    --output '${run_dir}/prep' \
+                    --threads ${THREADS} \
+                    2>&1 || true"
+            else
+                log "    WARNING: Script not found: ${script_path}"
+            fi
             ;;
         C)
-            # Intersect-first
-            run_cmd "${SCRIPT_DIR}/alternative_approaches/approach_c_intersect_first.sh \
-                --inputs '${INPUT_PLINK}' \
-                --output '${run_dir}/prep' \
-                --threads ${THREADS} \
-                2>&1 || true"
+            # Intersect-first + QC-before
+            if [[ -f "$script_path" ]]; then
+                run_cmd "${script_path} \
+                    --inputs '${INPUT_PLINK}' \
+                    --output '${run_dir}/prep' \
+                    --threads ${THREADS} \
+                    2>&1 || true"
+            else
+                log "    WARNING: Script not found: ${script_path}"
+            fi
             ;;
         D)
-            # Per-platform QC + intersect
-            run_cmd "${SCRIPT_DIR}/alternative_approaches/approach_d_qcbefore_michigan.sh \
-                --inputs '${INPUT_PLINK}' \
-                --output '${run_dir}/prep' \
-                --threads ${THREADS} \
-                2>&1 || true"
+            # Intersect + QC-after (Verma/Charon)
+            if [[ -f "$script_path" ]]; then
+                run_cmd "${script_path} \
+                    --inputs '${INPUT_PLINK}' \
+                    --output '${run_dir}/prep' \
+                    --threads ${THREADS} \
+                    2>&1 || true"
+            else
+                log "    WARNING: Script not found: ${script_path}"
+            fi
             ;;
         E|F)
-            # Our pipeline - minimal pre-processing
-            log "    Our pipeline: Minimal prep (QC after imputation)"
-            run_cmd "plink2 --bfile '${INPUT_PLINK}' \
-                --geno 0.1 --mind 0.1 \
-                --export vcf-4.2 bgz \
-                --out '${run_dir}/prep/minimal_qc' \
-                --threads ${THREADS}"
+            # Our pipeline - use Nextflow with appropriate config
+            local config_name="ours_$([[ $approach == E ]] && echo '1step' || echo '2step')_${server}.config"
+            local config_path="${SCRIPT_DIR}/our_pipeline_variants/${config_name}"
+
+            if [[ -f "$config_path" ]]; then
+                log "    Our pipeline: Using config ${config_name}"
+                run_cmd "nextflow run '${PIPELINE_DIR}/main.nf' \
+                    -c '${config_path}' \
+                    --sample_sheet '${INPUT_DIR}/benchmark_sample_sheet.csv' \
+                    --outdir '${run_dir}/prep' \
+                    -profile benchmark \
+                    2>&1 || true"
+            else
+                # Fallback to minimal preprocessing
+                log "    Our pipeline: Minimal prep (config not found: ${config_path})"
+                run_cmd "plink2 --bfile '${INPUT_PLINK}' \
+                    --geno 0.1 --mind 0.1 \
+                    --export vcf-4.2 bgz \
+                    --out '${run_dir}/prep/minimal_qc' \
+                    --threads ${THREADS}"
+            fi
             ;;
     esac
 
