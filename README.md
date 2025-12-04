@@ -178,7 +178,8 @@ nextflow run main.nf \
 | `magicalrsq_threshold` | `0.3` | MagicalRsq-X R² threshold |
 | `sample_call_rate` | `0.95` | Minimum sample call rate |
 | `variant_call_rate` | `0.95` | Minimum variant call rate |
-| `hwe_pvalue` | `1e-6` | HWE filter p-value |
+| `skip_hwe` | `true` | Skip HWE filter (recommended for admixed populations) |
+| `hwe_pvalue` | `1e-6` | HWE filter p-value (used if skip_hwe=false) |
 | `kinship_threshold` | `0.177` | 1st-degree relatedness threshold |
 
 ### Ancestry Analysis

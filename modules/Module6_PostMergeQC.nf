@@ -356,16 +356,22 @@ process FILTER_CALL_RATE {
 
 /*
  * Process 7: Filter by Hardy-Weinberg Equilibrium (HWE)
- * Remove variants with HWE p-value < 1e-6
+ * Remove variants with HWE p-value < threshold
+ * NOTE: Skipped by default (params.skip_hwe=true) for admixed populations
+ *       HWE assumptions are violated in admixed/structured populations
+ *       Enable with --skip_hwe false if working with homogeneous populations
  */
 process FILTER_HWE {
     tag "${sample_id}_${server}"
     label 'process_medium'
     publishDir "${params.outdir}/module6/06_hwe_filtered/${server}", mode: 'copy'
-    
+
     input:
     tuple val(sample_id), val(server), path(bed), path(bim), path(fam)
-    
+
+    when:
+    !params.skip_hwe
+
     output:
     tuple val(sample_id), val(server),
           path("${sample_id}_${server}_hwe.bed"),
@@ -373,32 +379,32 @@ process FILTER_HWE {
           path("${sample_id}_${server}_hwe.fam"), emit: filtered_files
     path("${sample_id}_${server}.hwe"), emit: hwe_stats
     path("${sample_id}_${server}_hwe_filter_log.txt"), emit: filter_log
-    
+
     script:
-    def hwe_threshold = params.hwe_threshold ?: 1e-6
+    def hwe_threshold = params.hwe_pvalue ?: 1e-6
     """
     echo "=== HWE filtering for ${sample_id} (${server}) ==="
     echo "HWE threshold: ${hwe_threshold}"
-    
+
     # Count before
     n_variants_before=\$(wc -l < ${bim})
-    
+
     # Calculate HWE
     plink --bfile ${sample_id}_${server} \\
         --hardy \\
         --out ${sample_id}_${server} \\
         --threads ${task.cpus}
-    
+
     # Filter variants failing HWE
     plink --bfile ${sample_id}_${server} \\
         --hwe ${hwe_threshold} \\
         --make-bed \\
         --out ${sample_id}_${server}_hwe \\
         --threads ${task.cpus}
-    
+
     # Count after
     n_variants_after=\$(wc -l < ${sample_id}_${server}_hwe.bim)
-    
+
     # Log
     {
         echo "HWE Filtering Results (${server})"
@@ -408,7 +414,7 @@ process FILTER_HWE {
         echo "Variants after: \$n_variants_after"
         echo "Variants removed: \$((n_variants_before - n_variants_after))"
     } > ${sample_id}_${server}_hwe_filter_log.txt
-    
+
     echo "=== HWE filtering complete ==="
     """
 }
@@ -1134,11 +1140,18 @@ workflow MODULE6_POSTMERGE_QC {
     // Step 7: Filter by call rate
     FILTER_CALL_RATE(CALCULATE_CALL_RATES.out.with_missingness)
     
-    // Step 8: Filter by HWE
+    // Step 8: Filter by HWE (skipped by default for admixed populations)
+    // HWE assumptions are violated in admixed/structured populations
+    // Enable with --skip_hwe false for homogeneous population studies
     FILTER_HWE(FILTER_CALL_RATE.out.filtered_files)
-    
+
+    // Conditionally route data: use HWE output if HWE ran, otherwise bypass
+    hwe_output = params.skip_hwe
+        ? FILTER_CALL_RATE.out.filtered_files
+        : FILTER_HWE.out.filtered_files
+
     // Step 9: Filter heterozygosity
-    FILTER_HETEROZYGOSITY(FILTER_HWE.out.filtered_files)
+    FILTER_HETEROZYGOSITY(hwe_output)
     
     // Step 10: Calculate kinship
     CALCULATE_KINSHIP(FILTER_HETEROZYGOSITY.out.filtered_files)

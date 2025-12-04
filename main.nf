@@ -72,7 +72,8 @@ def helpMessage() {
         --magicalrsq_threshold NUM    MagicalRsq-X R² threshold [default: 0.3]
         --sample_call_rate NUM        Sample call rate [default: 0.95]
         --variant_call_rate NUM       Variant call rate [default: 0.95]
-        --hwe_pvalue NUM              HWE p-value [default: 1e-6]
+        --skip_hwe                    Skip HWE filter [default: true] (for admixed pops)
+        --hwe_pvalue NUM              HWE p-value threshold [default: 1e-6]
         --use_genesis                 Use GENESIS PCRelate [default: true]
     
     Optional Arguments - Module 7:
