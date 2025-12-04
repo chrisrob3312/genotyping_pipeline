@@ -2,16 +2,13 @@
 ################################################################################
 # setup_reference_files.sh
 #
-# WRAPPER SCRIPT - Calls the appropriate reference download script based on
-# which modules you need to run.
+# Wrapper script to set up all reference files for the genotyping pipeline.
 #
-# This script has been split into two parts for flexibility:
+# Downloads ALL publicly available references (Modules 1-7):
+#   ./download_core_references.sh
 #
-#   1. download_core_references.sh     - Modules 1-6 (can run immediately)
-#   2. download_ancestry_references.sh - Module 7 (requires LAI reference panel)
-#
-# Usage:
-#   ./setup_reference_files.sh [--all | --core | --ancestry] [OPTIONS]
+# For LAI reference panel (requires YOUR custom HGDP-1KG + MX Biobank data):
+#   ./format_reference_panel.sh
 #
 ################################################################################
 
@@ -19,7 +16,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-./pipeline_references}"
-MODE="all"
 
 # =============================================================================
 # Parse Arguments
@@ -27,88 +23,66 @@ MODE="all"
 
 print_usage() {
     cat << EOF
-Usage: $0 [MODE] [OPTIONS]
+Usage: $0 [OPTIONS]
 
-Wrapper script to download reference files for the genotyping pipeline.
-
-Modes:
-  --all        Download both core and ancestry references (default)
-  --core       Download only core references (Modules 1-6)
-  --ancestry   Download only ancestry references (Module 7)
+Downloads all publicly available reference files for the genotyping pipeline.
 
 Options:
   -o, --output-dir DIR   Output directory (default: ./pipeline_references)
+  --skip-fasta           Skip FASTA download
+  --skip-genetic-maps    Skip genetic maps download
   -h, --help             Show this help
 
-Reference Scripts:
-------------------
+What Gets Downloaded (ALL PUBLIC - no custom data needed):
+----------------------------------------------------------
 
-Core References (Modules 1-6):
-  ./download_core_references.sh
+For Modules 1-6 (Imputation):
+  - Chain files (hg19 <-> hg38 liftover)
+  - TOPMed Freeze 10 reference (BRAVO) + helper script
+  - HRC reference (hg19)
+  - Reference FASTA files
 
-  Downloads:
-    - Chain files (hg19 <-> hg38 liftover)
-    - TOPMed Freeze 5 reference (hg38)
-    - HRC reference (hg19)
-    - Reference FASTA files
+For Module 7 (Ancestry):
+  - SHAPEIT5 genetic maps (b37 and b38)
+  - TractorWorkflow genetic maps
 
-  These are publicly available and can be downloaded immediately.
+What Requires YOUR Custom Data (not downloaded):
+------------------------------------------------
 
-Ancestry References (Module 7):
-  ./download_ancestry_references.sh
+  LAI Reference Panel (for RFMix, FLARE, G-NOMIX)
+  -> Requires HGDP-1KG + MX Biobank WGS data
+  -> Prepare using: ./format_reference_panel.sh
 
-  Downloads:
-    - SHAPEIT5 genetic maps
-    - TractorWorkflow reference data
+Workflow:
+---------
 
-  IMPORTANT: The LAI reference panel (HGDP-1KG + MX Biobank) is NOT
-  downloaded automatically. You must prepare it using:
+1. Download public references:
+   ./setup_reference_files.sh -o /path/to/references
 
-    ./format_reference_panel.sh
+2. Download BRAVO Freeze 10 (manual - signed URLs):
+   cd /path/to/references/bravo_vcfs
+   ./download_bravo_freeze10.sh
 
-Recommended Workflow:
----------------------
+3. Convert BRAVO to Rayner format:
+   ./convert_bravo_to_rayner.sh ...
 
-1. Run core references first:
-   ./setup_reference_files.sh --core -o /path/to/references
-
-2. Test Modules 1-6 with the core references
-
-3. When ready for Module 7, download ancestry references:
-   ./setup_reference_files.sh --ancestry -o /path/to/references
-
-4. Prepare your LAI reference panel:
+4. (When ready) Prepare LAI reference panel:
    ./format_reference_panel.sh --input your_reference.vcf.gz ...
 
 EOF
 }
 
+# Pass all arguments to download_core_references.sh
+ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --all)
-            MODE="all"
-            shift
-            ;;
-        --core)
-            MODE="core"
-            shift
-            ;;
-        --ancestry)
-            MODE="ancestry"
-            shift
-            ;;
-        -o|--output-dir)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
         -h|--help)
             print_usage
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            print_usage
-            exit 1
+            ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -116,59 +90,20 @@ done
 echo "=============================================="
 echo "Genotyping Pipeline Reference Setup"
 echo "=============================================="
-echo "Mode:             ${MODE}"
-echo "Output directory: ${OUTPUT_DIR}"
 echo ""
 
-# =============================================================================
-# Run Appropriate Scripts
-# =============================================================================
-
-if [[ "$MODE" == "all" ]] || [[ "$MODE" == "core" ]]; then
-    echo ""
-    echo ">>> Running Core References Download (Modules 1-6) <<<"
-    echo ""
-
-    "${SCRIPT_DIR}/download_core_references.sh" --output-dir "${OUTPUT_DIR}"
-fi
-
-if [[ "$MODE" == "all" ]] || [[ "$MODE" == "ancestry" ]]; then
-    echo ""
-    echo ">>> Running Ancestry References Download (Module 7) <<<"
-    echo ""
-
-    "${SCRIPT_DIR}/download_ancestry_references.sh" --output-dir "${OUTPUT_DIR}"
-fi
-
-# =============================================================================
-# Summary
-# =============================================================================
+# Run the core references download
+"${SCRIPT_DIR}/download_core_references.sh" "${ARGS[@]}"
 
 echo ""
 echo "=============================================="
-echo "Reference Setup Complete!"
+echo "Setup Complete!"
 echo "=============================================="
 echo ""
-echo "Downloaded references are in: ${OUTPUT_DIR}"
+echo "All public references have been downloaded."
 echo ""
-
-if [[ "$MODE" == "all" ]] || [[ "$MODE" == "ancestry" ]]; then
-    echo "REMINDER: For Module 7, you still need to prepare your LAI reference panel."
-    echo "Run: ./format_reference_panel.sh --help for instructions."
-    echo ""
-fi
-
-echo "To copy references to your pipeline:"
+echo "Remaining manual steps:"
+echo "  1. Download BRAVO Freeze 10 (see bravo_vcfs/download_bravo_freeze10.sh)"
+echo "  2. Convert BRAVO to Rayner format"
+echo "  3. (Optional) Prepare LAI reference panel with format_reference_panel.sh"
 echo ""
-echo "  # Core references (Modules 1-6)"
-echo "  cp ${OUTPUT_DIR}/chain_files/* resources/chain_files/"
-echo "  cp ${OUTPUT_DIR}/rayner_refs/* resources/rayner/"
-echo "  cp -r ${OUTPUT_DIR}/fasta/* resources/references/"
-echo ""
-
-if [[ "$MODE" == "all" ]] || [[ "$MODE" == "ancestry" ]]; then
-    echo "  # Ancestry references (Module 7)"
-    echo "  cp -r ${OUTPUT_DIR}/genetic_maps/* resources/genetic_maps/"
-    echo "  cp -r ${OUTPUT_DIR}/lai_reference/* resources/ancestry_references/lai_reference/"
-    echo ""
-fi

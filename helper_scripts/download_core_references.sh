@@ -2,25 +2,27 @@
 ################################################################################
 # download_core_references.sh
 #
-# Downloads and organizes CORE reference files for Modules 1-6 (Pre-Ancestry):
+# Downloads ALL publicly available reference files for Modules 1-7:
 #   - Chain files (liftover between hg19/hg38)
-#   - TOPMed Freeze 5/10 reference (Rayner format for imputation QC)
+#   - TOPMed Freeze 10 reference (BRAVO - required for imputation QC)
 #   - HRC reference for hg19 fallback
 #   - Reference genome FASTA files (hg19/hg38)
+#   - Genetic maps (SHAPEIT5 b37/b38 + TractorWorkflow format)
 #
-# These references are publicly available and can be downloaded immediately.
-# Run this script BEFORE running Modules 1-6.
+# IMPORTANT: These are ALL publicly available - NO custom data required!
 #
-# For Module 7 (Ancestry), use download_ancestry_references.sh instead
-# (requires HGDP-1KG + MX Biobank reference panel to be prepared first).
+# The ONLY thing that requires your custom HGDP-1KG + MX Biobank data is
+# the LAI reference panel, which you prepare separately using:
+#   ./format_reference_panel.sh
 #
 # Usage:
 #   ./download_core_references.sh --output-dir /path/to/references
 #
 # Requirements:
-#   - wget, curl
+#   - wget, curl, unzip
+#   - bcftools (for BRAVO Freeze 10 conversion)
 #   - samtools (for FASTA indexing, optional)
-#   - ~50GB disk space
+#   - ~60GB disk space
 #
 ################################################################################
 
@@ -31,8 +33,11 @@ set -euo pipefail
 # =============================================================================
 
 OUTPUT_DIR="${OUTPUT_DIR:-./pipeline_references}"
-SKIP_BRAVO="${SKIP_BRAVO:-false}"
 SKIP_FASTA="${SKIP_FASTA:-false}"
+SKIP_GENETIC_MAPS="${SKIP_GENETIC_MAPS:-false}"
+
+# TractorWorkflow reference data (genetic maps only - no custom panel needed)
+TRACTOR_TESTDATA="https://github.com/Atkinson-Lab/Tractor-tutorial/raw/refs/heads/main/test_data.zip"
 
 # =============================================================================
 # Parse Arguments
@@ -42,28 +47,31 @@ print_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Downloads CORE reference files for Modules 1-6 (Pre-Ancestry).
+Downloads ALL publicly available reference files for Modules 1-7.
 
 Options:
   -o, --output-dir DIR   Output directory (default: ./pipeline_references)
-  --skip-bravo           Skip BRAVO/TOPMed download instructions
   --skip-fasta           Skip FASTA download (if you already have them)
+  --skip-genetic-maps    Skip genetic maps download
   -h, --help             Show this help
 
-Reference Sources:
-  - Chain files:    UCSC Genome Browser
-  - TOPMed (hg38):  BRAVO Freeze 10 or Freeze 5 fallback
-  - HRC (hg19):     Wellcome Sanger / Will Rayner's site
-  - FASTA:          1000 Genomes / NCBI
+What This Script Downloads (ALL PUBLIC - no custom data needed):
+----------------------------------------------------------------
 
-What This Script Downloads:
+For Modules 1-6 (Imputation Pipeline):
   [x] Chain files (hg19 <-> hg38 liftover)
-  [x] TOPMed Freeze 5 reference (fallback, auto-download)
+  [x] TOPMed Freeze 10 reference (BRAVO) - REQUIRED
   [x] HRC r1.1 reference (hg19)
   [x] Reference FASTA files (hg19, hg38)
-  [x] BRAVO Freeze 10 download helper (manual step required)
 
-For Module 7 (Ancestry), run download_ancestry_references.sh separately.
+For Module 7 (Ancestry - genetic maps only):
+  [x] SHAPEIT5 genetic maps (b37 and b38)
+  [x] TractorWorkflow genetic maps (RFMix2/GNomix format)
+
+What You Must Prepare Separately (requires YOUR data):
+------------------------------------------------------
+  [ ] LAI reference panel (HGDP-1KG + MX Biobank)
+      -> Use format_reference_panel.sh after obtaining your WGS reference
 
 EOF
 }
@@ -74,12 +82,12 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --skip-bravo)
-            SKIP_BRAVO=true
-            shift
-            ;;
         --skip-fasta)
             SKIP_FASTA=true
+            shift
+            ;;
+        --skip-genetic-maps)
+            SKIP_GENETIC_MAPS=true
             shift
             ;;
         -h|--help)
@@ -95,12 +103,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "=============================================="
-echo "Core Reference Files (Modules 1-6)"
+echo "Pipeline Reference Files Download"
 echo "=============================================="
 echo "Output directory: ${OUTPUT_DIR}"
 echo ""
+echo "All files are PUBLICLY available."
+echo "NO custom reference panel needed for this script."
+echo ""
 
-mkdir -p "${OUTPUT_DIR}"/{chain_files,bravo_vcfs,rayner_refs,fasta}
+mkdir -p "${OUTPUT_DIR}"/{chain_files,bravo_vcfs,rayner_refs,fasta,genetic_maps}
 
 cd "${OUTPUT_DIR}"
 
@@ -109,7 +120,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 1/4: Downloading Chain Files ==="
+echo "=== 1/5: Downloading Chain Files ==="
 echo ""
 
 cd chain_files
@@ -128,88 +139,96 @@ done
 cd "${OUTPUT_DIR}"
 
 # =============================================================================
-# 2. TOPMED REFERENCE (hg38)
+# 2. TOPMED FREEZE 10 REFERENCE (BRAVO) - REQUIRED
 # =============================================================================
 
 echo ""
-echo "=== 2/4: TOPMed Reference (hg38) ==="
+echo "=== 2/5: TOPMed Freeze 10 Reference (BRAVO) ==="
 echo ""
 
-cd rayner_refs
-
-# Download Freeze 5 (automatic, always available)
-if [ ! -f "PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz" ]; then
-    echo "  Downloading TOPMed Freeze 5 reference..."
-    wget -q -c "https://www.chg.ox.ac.uk/~wrayner/tools/PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz" && \
-        echo "  Downloaded TOPMed Freeze 5 successfully" || \
-        echo "  WARNING: Could not download Freeze 5 reference"
-else
-    echo "  TOPMed Freeze 5 exists, skipping..."
-fi
-
-cd "${OUTPUT_DIR}"
-
-# BRAVO Freeze 10 instructions (manual download required)
-if [ "$SKIP_BRAVO" != "true" ]; then
-    cat << 'BRAVO_INSTRUCTIONS'
-
+cat << 'BRAVO_INSTRUCTIONS'
 --------------------------------------------------------------------------------
-OPTIONAL: BRAVO Freeze 10 (Recommended for Better Coverage)
+BRAVO Freeze 10 VCF Download (REQUIRED for imputation QC)
 --------------------------------------------------------------------------------
 
-The BRAVO VCF files require signed URLs that expire after 15 minutes.
-You must download them manually from:
+The BRAVO Freeze 10 VCFs require signed URLs that expire after 15 minutes.
+You must download them manually:
 
-    https://bravo.sph.umich.edu/vcfs.html
+STEP 1: Visit https://bravo.sph.umich.edu/vcfs.html
 
-Steps:
-1. Visit the URL above in your browser
-2. Download all chromosome VCFs (chr1-22, X) to bravo_vcfs/
-3. Run the conversion script:
+STEP 2: Download all chromosome VCFs (chr1-22) to this directory:
+        ${OUTPUT_DIR}/bravo_vcfs/
 
-   ./helper_scripts/convert_bravo_to_rayner.sh \
-       --input-dir bravo_vcfs/ \
-       --output rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz
-
-NOTE: Freeze 5 (already downloaded) is sufficient for most use cases.
-      Freeze 10 provides better rare variant coverage.
+STEP 3: Run the conversion script:
+        ./helper_scripts/convert_bravo_to_rayner.sh \
+            --input-dir ${OUTPUT_DIR}/bravo_vcfs/ \
+            --output ${OUTPUT_DIR}/rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz
 
 --------------------------------------------------------------------------------
 BRAVO_INSTRUCTIONS
 
-    # Create download helper script
-    cat > bravo_vcfs/download_bravo.sh << 'DOWNLOAD_SCRIPT'
+# Create interactive download helper script
+cat > bravo_vcfs/download_bravo_freeze10.sh << 'DOWNLOAD_SCRIPT'
 #!/bin/bash
-# Download BRAVO Freeze 10 VCFs
-# Run this script after getting signed URLs from https://bravo.sph.umich.edu/vcfs.html
+################################################################################
+# BRAVO Freeze 10 Download Helper
+#
+# URLs expire after 15 minutes - download quickly!
+# Visit: https://bravo.sph.umich.edu/vcfs.html
+################################################################################
 
-echo "Paste the signed URLs for each chromosome when prompted"
-echo "URLs expire after 15 minutes, so download quickly"
+echo "=============================================="
+echo "BRAVO Freeze 10 VCF Download"
+echo "=============================================="
+echo ""
+echo "1. Open https://bravo.sph.umich.edu/vcfs.html in your browser"
+echo "2. For each chromosome, right-click the download link and copy URL"
+echo "3. Paste the URL when prompted below"
+echo ""
+echo "URLs expire in 15 minutes - work quickly!"
 echo ""
 
-for chr in {1..22} X; do
-    if [ ! -f "chr${chr}.bravo.pub.vcf.gz" ]; then
-        echo "Enter URL for chromosome ${chr}:"
+for chr in {1..22}; do
+    if [ ! -f "chr${chr}.bravo_freeze10.vcf.gz" ]; then
+        echo "----------------------------------------------"
+        echo "Chromosome ${chr}: Paste the signed URL and press Enter"
+        echo "(or press Enter to skip)"
         read -r url
         if [ -n "$url" ]; then
-            wget -O "chr${chr}.bravo.pub.vcf.gz" "$url"
+            echo "Downloading chr${chr}..."
+            wget -O "chr${chr}.bravo_freeze10.vcf.gz" "$url" && \
+                echo "  Downloaded chr${chr} successfully" || \
+                echo "  WARNING: Failed to download chr${chr}"
+        else
+            echo "  Skipped chr${chr}"
         fi
     else
-        echo "chr${chr}.bravo.pub.vcf.gz exists, skipping..."
+        echo "chr${chr}.bravo_freeze10.vcf.gz exists, skipping..."
     fi
 done
 
-echo "Download complete. Now run convert_bravo_to_rayner.sh"
+echo ""
+echo "=============================================="
+echo "Download complete!"
+echo "=============================================="
+echo ""
+echo "Next step: Convert to Rayner format:"
+echo "  ../helper_scripts/convert_bravo_to_rayner.sh \\"
+echo "      --input-dir ./ \\"
+echo "      --output ../rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz"
+echo ""
 DOWNLOAD_SCRIPT
-    chmod +x bravo_vcfs/download_bravo.sh
-fi
+chmod +x bravo_vcfs/download_bravo_freeze10.sh
+
+echo "  Created: bravo_vcfs/download_bravo_freeze10.sh"
+echo "  Run this script after visiting https://bravo.sph.umich.edu/vcfs.html"
 
 # =============================================================================
 # 3. HRC REFERENCE (hg19/GRCh37)
 # =============================================================================
 
 echo ""
-echo "=== 3/4: HRC Reference (hg19/GRCh37) ==="
+echo "=== 3/5: HRC Reference (hg19/GRCh37) ==="
 echo ""
 
 cd rayner_refs
@@ -230,7 +249,7 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== 4/4: Reference FASTA Files ==="
+echo "=== 4/5: Reference FASTA Files ==="
 echo ""
 
 if [ "$SKIP_FASTA" = "true" ]; then
@@ -244,7 +263,7 @@ else
     if [ ! -f "human_g1k_v37.fasta" ]; then
         echo "  Downloading GRCh37 reference (~3GB)..."
         wget -q -c "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz" && \
-            gunzip -k human_g1k_v37.fasta.gz && \
+            gunzip -k human_g1k_v37.fasta.gz 2>/dev/null && \
             echo "  Downloaded GRCh37 reference" || \
             echo "  WARNING: Could not download GRCh37 reference"
 
@@ -278,18 +297,75 @@ else
 fi
 
 # =============================================================================
+# 5. GENETIC MAPS (Public - no custom panel needed!)
+# =============================================================================
+
+echo ""
+echo "=== 5/5: Genetic Maps (SHAPEIT5 + TractorWorkflow) ==="
+echo ""
+
+if [ "$SKIP_GENETIC_MAPS" = "true" ]; then
+    echo "  Skipping genetic maps download (--skip-genetic-maps flag set)"
+else
+    cd genetic_maps
+
+    # Create subdirectories
+    mkdir -p shapeit5_b37 shapeit5_b38 tractor_format
+
+    # Download SHAPEIT5 genetic maps (b37/hg19)
+    if [ ! -f "shapeit5_b37/chr1.b37.gmap.gz" ]; then
+        echo "  Downloading SHAPEIT5 genetic maps (b37/hg19)..."
+        wget -q -c "https://github.com/odelaneau/shapeit5/raw/main/maps/genetic_maps.b37.tar.gz" -O shapeit5_b37.tar.gz && \
+            tar -xzf shapeit5_b37.tar.gz -C shapeit5_b37 --strip-components=1 2>/dev/null && \
+            rm -f shapeit5_b37.tar.gz && \
+            echo "  Downloaded b37 genetic maps" || \
+            echo "  WARNING: Could not download b37 maps"
+    else
+        echo "  SHAPEIT5 b37 maps exist, skipping..."
+    fi
+
+    # Download SHAPEIT5 genetic maps (b38/hg38)
+    if [ ! -f "shapeit5_b38/chr1.b38.gmap.gz" ]; then
+        echo "  Downloading SHAPEIT5 genetic maps (b38/hg38)..."
+        wget -q -c "https://github.com/odelaneau/shapeit5/raw/main/maps/genetic_maps.b38.tar.gz" -O shapeit5_b38.tar.gz && \
+            tar -xzf shapeit5_b38.tar.gz -C shapeit5_b38 --strip-components=1 2>/dev/null && \
+            rm -f shapeit5_b38.tar.gz && \
+            echo "  Downloaded b38 genetic maps" || \
+            echo "  WARNING: Could not download b38 maps"
+    else
+        echo "  SHAPEIT5 b38 maps exist, skipping..."
+    fi
+
+    # Download TractorWorkflow genetic maps (RFMix2/GNomix format)
+    if [ ! -d "tractor_format/references" ]; then
+        echo "  Downloading TractorWorkflow genetic maps..."
+        wget -q -c "$TRACTOR_TESTDATA" -O tractor_test_data.zip && \
+            unzip -q -o tractor_test_data.zip && \
+            mv test_data/references tractor_format/ && \
+            rm -rf test_data tractor_test_data.zip && \
+            echo "  Downloaded TractorWorkflow maps" || \
+            echo "  WARNING: Could not download TractorWorkflow data"
+    else
+        echo "  TractorWorkflow maps exist, skipping..."
+    fi
+
+    cd "${OUTPUT_DIR}"
+fi
+
+# =============================================================================
 # CREATE SUMMARY
 # =============================================================================
 
 echo ""
 echo "=== Creating Summary ==="
 
-cat > CORE_REFERENCES_README.txt << 'EOF'
+cat > REFERENCES_README.txt << 'EOF'
 ================================================================================
-Core Pipeline Reference Files (Modules 1-6)
+Pipeline Reference Files (Modules 1-7)
 ================================================================================
 
-This directory contains reference files for Modules 1-6 (Pre-Ancestry).
+ALL files in this directory are PUBLICLY AVAILABLE.
+NO custom reference panel is needed for these downloads.
 
 Directory Structure:
 --------------------
@@ -298,54 +374,79 @@ chain_files/
 ├── hg19ToHg38.over.chain.gz      # Liftover hg19 → hg38
 └── hg38ToHg19.over.chain.gz      # Liftover hg38 → hg19
 
+bravo_vcfs/
+├── download_bravo_freeze10.sh    # Helper script for BRAVO download
+└── chr*.bravo_freeze10.vcf.gz    # BRAVO Freeze 10 VCFs (manual download)
+
 rayner_refs/
-├── PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz   # TOPMed Fr5 (default)
-├── PASS.Variants.TOPMed_freeze10_hg38.tab.gz        # TOPMed Fr10 (optional)
-└── HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz            # HRC for hg19
+├── PASS.Variants.TOPMed_freeze10_hg38.tab.gz  # TOPMed Fr10 (from BRAVO)
+└── HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz      # HRC for hg19
 
 fasta/
 ├── hg19/human_g1k_v37.fasta      # GRCh37 reference
 └── hg38/GRCh38_full_analysis_set_plus_decoy_hla.fa  # GRCh38 reference
 
+genetic_maps/
+├── shapeit5_b37/                 # SHAPEIT5 genetic maps (hg19)
+├── shapeit5_b38/                 # SHAPEIT5 genetic maps (hg38)
+└── tractor_format/               # RFMix2/GNomix format maps
+
+
+BRAVO Freeze 10 Setup (REQUIRED):
+---------------------------------
+
+1. Run: cd bravo_vcfs && ./download_bravo_freeze10.sh
+2. Follow prompts to download each chromosome
+3. Convert: ./helper_scripts/convert_bravo_to_rayner.sh ...
+
+
+What Still Requires YOUR Custom Data:
+-------------------------------------
+
+ONLY the LAI reference panel (for RFMix, FLARE, G-NOMIX) requires your
+HGDP-1KG + MX Biobank WGS data. Prepare it using:
+
+    ./helper_scripts/format_reference_panel.sh \
+        --input /path/to/your_combined_reference.vcf.gz \
+        --sample-map /path/to/sample_populations.txt \
+        --genetic-map-dir genetic_maps/shapeit5_b38/ \
+        --output-dir lai_reference/
+
 
 Copy to Pipeline:
 -----------------
 
-cp chain_files/* /path/to/pipeline/resources/chain_files/
-cp rayner_refs/* /path/to/pipeline/resources/rayner/
-cp -r fasta/* /path/to/pipeline/resources/references/
+# All core references
+cp chain_files/* resources/chain_files/
+cp rayner_refs/* resources/rayner/
+cp -r fasta/* resources/references/
+cp -r genetic_maps/* resources/genetic_maps/
 
-
-Modules Supported:
-------------------
-
-  Module 1 (Pre-Imputation QC):  chain_files/, rayner_refs/, fasta/
-  Module 2 (Imputation):         (uses imputation server references)
-  Module 3 (Post-Imputation QC): rayner_refs/
-  Module 4 (Platform Merging):   fasta/
-  Module 5 (Re-Imputation):      (uses imputation server references)
-  Module 6 (Post-Merge QC):      rayner_refs/
-
-For Module 7 (Ancestry), run download_ancestry_references.sh separately.
+# LAI reference (after you prepare it with your custom data)
+cp -r lai_reference/* resources/ancestry_references/lai_reference/
 
 ================================================================================
 EOF
 
 echo ""
 echo "=============================================="
-echo "Core Reference Download Complete!"
+echo "Reference Download Complete!"
 echo "=============================================="
 echo ""
 echo "Downloaded files:"
-find "${OUTPUT_DIR}" -type f \( -name "*.gz" -o -name "*.fa" -o -name "*.fasta" \) 2>/dev/null | head -10
+find "${OUTPUT_DIR}" -type f \( -name "*.gz" -o -name "*.fa" -o -name "*.fasta" \) 2>/dev/null | head -15
 echo ""
 echo "Total size:"
 du -sh "${OUTPUT_DIR}"
 echo ""
-echo "These references are ready for Modules 1-6."
+echo "=============================================="
+echo "IMPORTANT: BRAVO Freeze 10 (TOPMed) still needs manual download!"
+echo "=============================================="
 echo ""
-echo "Next steps:"
-echo "  1. (Optional) Download BRAVO Freeze 10 for better coverage"
-echo "  2. Copy files to pipeline resources directory"
-echo "  3. For Module 7, run download_ancestry_references.sh"
+echo "Run: cd ${OUTPUT_DIR}/bravo_vcfs && ./download_bravo_freeze10.sh"
+echo ""
+echo "After downloading BRAVO, convert it:"
+echo "  ./helper_scripts/convert_bravo_to_rayner.sh \\"
+echo "      --input-dir ${OUTPUT_DIR}/bravo_vcfs/ \\"
+echo "      --output ${OUTPUT_DIR}/rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz"
 echo ""
