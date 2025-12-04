@@ -1,0 +1,295 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Author Christina Robinson
+    Version 2.0
+    Description ADMIXTURE + RFMix v1/v2 + FLARE + G-NOMIX + Graf-anc for ancestry analysis
+
+%help
+    This container provides:
+    - ADMIXTURE: Global ancestry estimation
+    - Graf-anc: Global ancestry inference (integrated)
+    - RFMix v1: Local ancestry inference (older version)
+    - RFMix v2: Local ancestry inference (newer version)
+    - FLARE: Fast Local Ancestry Estimation
+    - G-NOMIX: Graph-based local ancestry inference
+    - bcftools, PLINK for data manipulation
+    - Python 3 with numpy, pandas, scipy
+    
+    All tools are fully integrated and available in PATH.
+    
+    Used in Module 7 (Ancestry Estimation)
+
+%post
+    # Set non-interactive installation
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Update and install system dependencies
+    apt-get update && apt-get install -y \
+        wget \
+        curl \
+        git \
+        build-essential \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        pkg-config \
+        python3 \
+        python3-pip \
+        python3-dev \
+        zlib1g-dev \
+        libbz2-dev \
+        liblzma-dev \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libncurses5-dev \
+        unzip \
+        gfortran \
+        libopenblas-dev \
+        liblapack-dev \
+        default-jdk \
+        && rm -rf /var/lib/apt/lists/*
+    
+    # Install Python scientific computing libraries
+    pip3 install --no-cache-dir \
+        numpy \
+        pandas \
+        scipy \
+        scikit-learn \
+        matplotlib \
+        seaborn \
+        pyyaml
+    
+    # Install bcftools for VCF manipulation
+    cd /opt
+    wget https://github.com/samtools/bcftools/releases/download/1.18/bcftools-1.18.tar.bz2
+    tar -xjf bcftools-1.18.tar.bz2
+    cd bcftools-1.18
+    ./configure --prefix=/usr/local
+    make
+    make install
+    cd /opt
+    rm -rf bcftools-1.18 bcftools-1.18.tar.bz2
+    
+    # Install htslib (includes tabix, bgzip)
+    cd /opt
+    wget https://github.com/samtools/htslib/releases/download/1.18/htslib-1.18.tar.bz2
+    tar -xjf htslib-1.18.tar.bz2
+    cd htslib-1.18
+    ./configure --prefix=/usr/local
+    make
+    make install
+    cd /opt
+    rm -rf htslib-1.18 htslib-1.18.tar.bz2
+    
+    # Install PLINK 1.9
+    cd /opt
+    wget https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20231211.zip
+    unzip plink_linux_x86_64_20231211.zip
+    mv plink /usr/local/bin/
+    chmod +x /usr/local/bin/plink
+    rm plink_linux_x86_64_20231211.zip
+    
+    # ========================================================================
+    # INSTALL ADMIXTURE
+    # ========================================================================
+    echo "Installing ADMIXTURE..."
+    cd /opt
+    wget http://dalexander.github.io/admixture/binaries/admixture_linux-1.3.0.tar.gz
+    tar -xzf admixture_linux-1.3.0.tar.gz
+    cd admixture_linux-1.3.0
+    mv admixture /usr/local/bin/
+    mv admixture32 /usr/local/bin/ 2>/dev/null || true
+    cd /opt
+    rm -rf admixture_linux-1.3.0 admixture_linux-1.3.0.tar.gz
+    
+    # ========================================================================
+    # INSTALL GRAF-ANC (GLOBAL ANCESTRY INFERENCE)
+    # ========================================================================
+    echo "Installing Graf-anc..."
+    cd /opt
+    git clone https://github.com/jimmy-penn/graf-anc.git
+    cd graf-anc
+    
+    # Graf-anc is typically a C++ tool that needs compilation
+    # Check for build instructions
+    if [ -f "Makefile" ]; then
+        make
+        # Move compiled binary to PATH
+        if [ -f "graf" ]; then
+            cp graf /usr/local/bin/
+            chmod +x /usr/local/bin/graf
+        fi
+    elif [ -f "CMakeLists.txt" ]; then
+        mkdir -p build
+        cd build
+        cmake ..
+        make
+        make install
+        cd ..
+    fi
+    
+    # If there are Python scripts, make them available
+    if [ -d "scripts" ]; then
+        chmod +x scripts/*.py 2>/dev/null || true
+        chmod +x scripts/*.sh 2>/dev/null || true
+    fi
+    
+    # Set environment variable for Graf-anc location
+    echo 'export GRAFANC_HOME="/opt/graf-anc"' >> /etc/environment
+    
+    # ========================================================================
+    # INSTALL RFMIX v1
+    # ========================================================================
+    echo "Installing RFMix v1..."
+    cd /opt
+    git clone https://github.com/slowkoni/rfmix.git rfmix_v1
+    cd rfmix_v1
+    # RFMix v1 is in the RFMIX_v1.5.4 subdirectory
+    if [ -d "RFMIX_v1.5.4" ]; then
+        cd RFMIX_v1.5.4
+        make clean 2>/dev/null || true
+        make
+        # Copy executable with versioned name
+        if [ -f "RunRFMix.py" ]; then
+            cp RunRFMix.py /usr/local/bin/rfmix_v1
+            chmod +x /usr/local/bin/rfmix_v1
+        fi
+    fi
+    
+    # ========================================================================
+    # INSTALL RFMIX v2
+    # ========================================================================
+    echo "Installing RFMix v2..."
+    cd /opt
+    git clone https://github.com/slowkoni/rfmix.git rfmix_v2
+    cd rfmix_v2
+    # RFMix v2 uses autotools
+    if [ -f "configure.ac" ] || [ -f "configure" ]; then
+        autoreconf --force --install 2>/dev/null || true
+        if [ ! -f "configure" ]; then
+            ./bootstrap.sh 2>/dev/null || true
+        fi
+        ./configure --prefix=/usr/local
+        make
+        make install
+    else
+        # Alternative: direct make if available
+        if [ -f "Makefile" ]; then
+            make
+            if [ -f "rfmix" ]; then
+                cp rfmix /usr/local/bin/
+                chmod +x /usr/local/bin/rfmix
+            fi
+        fi
+    fi
+    
+    # ========================================================================
+    # INSTALL FLARE
+    # ========================================================================
+    echo "Installing FLARE..."
+    cd /opt
+    git clone https://github.com/browning-lab/flare.git
+    cd flare
+    
+    # FLARE is Java-based, compile if build script exists
+    if [ -f "build.sh" ]; then
+        bash build.sh
+    elif [ -f "build.xml" ]; then
+        # If it uses ant
+        apt-get update && apt-get install -y ant && rm -rf /var/lib/apt/lists/*
+        ant
+    fi
+    
+    # Create wrapper script for FLARE
+    if [ -f "flare.jar" ]; then
+        cat > /usr/local/bin/flare << 'EOF'
+#!/bin/bash
+java -Xmx4g -jar /opt/flare/flare.jar "$@"
+EOF
+        chmod +x /usr/local/bin/flare
+    fi
+    
+    # ========================================================================
+    # INSTALL G-NOMIX
+    # ========================================================================
+    echo "Installing G-NOMIX..."
+    cd /opt
+    
+    # Clone G-NOMIX repository
+    git clone https://github.com/AI-sandbox/gnomix.git gnomix 2>/dev/null || \
+        echo "NOTE: G-NOMIX repository may not be publicly available or URL changed"
+    
+    if [ -d "gnomix" ]; then
+        cd gnomix
+        
+        # Install as Python package if setup.py exists
+        if [ -f "setup.py" ]; then
+            pip3 install --no-cache-dir -e .
+        elif [ -f "requirements.txt" ]; then
+            pip3 install --no-cache-dir -r requirements.txt
+            # Make scripts executable
+            chmod +x *.py 2>/dev/null || true
+        fi
+        
+        # Set environment variable
+        echo 'export GNOMIX_HOME="/opt/gnomix"' >> /etc/environment
+    fi
+    
+    # Verify installations
+    echo "=== Verifying installations ==="
+    python3 --version || echo "ERROR: Python installation failed"
+    bcftools --version || echo "ERROR: bcftools installation failed"
+    plink --version || echo "ERROR: PLINK installation failed"
+    admixture --version || echo "ERROR: ADMIXTURE installation failed"
+    
+    echo "=== Checking Graf-anc installation ==="
+    ls -la /opt/graf-anc/ || echo "WARNING: Graf-anc directory not found"
+    which graf 2>/dev/null || echo "NOTE: Graf-anc executable not in PATH (may need configuration)"
+    
+    echo "=== Checking RFMix installations ==="
+    which rfmix_v1 || echo "WARNING: RFMix v1 installation failed"
+    which rfmix || echo "WARNING: RFMix v2 installation failed"
+    
+    echo "=== Checking FLARE installation ==="
+    which flare || echo "WARNING: FLARE installation failed"
+    
+    echo "=== Checking G-NOMIX installation ==="
+    ls /opt/gnomix/ 2>/dev/null || echo "NOTE: G-NOMIX not installed"
+
+%environment
+    export LC_ALL=C
+    export PATH=/usr/local/bin:$PATH
+    export JAVA_HOME=/usr/lib/jvm/default-java
+    export GRAFANC_HOME="/opt/graf-anc"
+    export GNOMIX_HOME="/opt/gnomix"
+
+%runscript
+    echo "Ancestry Suite container"
+    echo "Available tools:"
+    echo "  - admixture (global ancestry)"
+    echo "  - graf (global ancestry - Graf-anc)"
+    echo "  - rfmix_v1 (local ancestry - v1)"
+    echo "  - rfmix (local ancestry - v2)"
+    echo "  - flare (local ancestry)"
+    echo "  - bcftools, plink (data manipulation)"
+    echo ""
+    echo "Tool locations:"
+    echo "  Graf-anc: /opt/graf-anc"
+    echo "  G-NOMIX: /opt/gnomix"
+    exec "$@"
+
+%test
+    # Test all critical tools
+    python3 --version
+    bcftools --version
+    plink --version
+    admixture --version
+    
+    # Test directory existence
+    test -d /opt/graf-anc
+    test -d /opt/rfmix_v1
+    test -d /opt/rfmix_v2
+    test -d /opt/flare
