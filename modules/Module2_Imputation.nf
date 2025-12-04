@@ -59,7 +59,7 @@ process groupChromosomesByPlatform {
     publishDir "${params.outdir}/module2/00_grouped/${platform}", mode: 'copy'
     
     // Use pre-built Apptainer container
-    container "${params.container_path}/python_tools.sif"
+    container "${projectDir}/resources/containers/python_api.sif"
     
     cpus 1
     memory '2.GB'
@@ -138,7 +138,7 @@ process submitToTOPMed {
     publishDir "${params.outdir}/module2/01_topmed/${platform}", mode: 'copy'
     
     // Use pre-built container with imputationbot installed
-    container "${params.container_path}/python_tools.sif"
+    container "${projectDir}/resources/containers/python_api.sif"
     
     cpus 4
     memory '8.GB'
@@ -306,7 +306,7 @@ process submitToAllOfUs {
     publishDir "${params.outdir}/module2/02_anvil/${platform}", mode: 'copy'
     
     // Use pre-built container with terralab-cli
-    container "${params.container_path}/python_tools.sif"
+    container "${projectDir}/resources/containers/python_api.sif"
     
     cpus 4
     memory '8.GB'
@@ -509,7 +509,7 @@ process monitorAndDownloadAllOfUs {
     publishDir "${params.outdir}/module2/02_anvil/${platform}", mode: 'copy'
     
     // Use pre-built container
-    container "${params.container_path}/python_tools.sif"
+    container "${projectDir}/resources/containers/python_api.sif"
     
     cpus 4
     memory '8.GB'
