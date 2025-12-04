@@ -863,6 +863,199 @@ process RFMIX_V2 {
 }
 
 /*
+ * Process 6B: FLARE Local Ancestry Inference (OPTIONAL)
+ * Fast HMM-based method from Browning Lab
+ * Reference: https://github.com/browning-lab/flare
+ */
+process FLARE_LAI {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/flare/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(reference_vcf)
+    path(reference_panel)
+    path(genetic_map)
+
+    when:
+    params.lai_methods.contains('flare')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("${sample_id}_${server}_chr${chr}.anc.vcf.gz"),
+          path("${sample_id}_${server}_chr${chr}.global.anc.gz"), emit: results
+    path("${sample_id}_${server}_chr${chr}.flare.log"), emit: log
+    path("${sample_id}_${server}_chr${chr}.model"), emit: model
+
+    script:
+    def mem_gb = task.memory ? task.memory.toGiga() : 16
+    """
+    echo "=== Running FLARE for chr${chr} (${server}) ==="
+
+    # FLARE command
+    # Reference: java -jar flare.jar ref=REF ref-panel=PANEL gt=QUERY map=MAP out=OUT
+    java -Xmx${mem_gb}g -jar \${FLARE_JAR:-/opt/flare/flare.jar} \\
+        ref=${reference_vcf} \\
+        ref-panel=${reference_panel} \\
+        gt=${vcf} \\
+        map=${genetic_map} \\
+        out=${sample_id}_${server}_chr${chr} \\
+        nthreads=${task.cpus} \\
+        em=true \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.flare.log
+
+    echo "=== FLARE complete for chr${chr} ==="
+    """
+}
+
+/*
+ * Process 6C: G-NOMIX Local Ancestry Inference (OPTIONAL)
+ * Neural network-based method - fastest option
+ * Reference: https://github.com/AI-sandbox/gnomix
+ */
+process GNOMIX_LAI {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/gnomix/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(model_file)  // Pre-trained model OR reference files for training
+    path(genetic_map)
+
+    when:
+    params.lai_methods.contains('gnomix')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("output/${sample_id}_${server}_chr${chr}.msp.tsv"),
+          path("output/${sample_id}_${server}_chr${chr}.fb.tsv"), emit: results
+    path("output/*.png"), emit: plots optional true
+    path("${sample_id}_${server}_chr${chr}.gnomix.log"), emit: log
+
+    script:
+    """
+    echo "=== Running G-NOMIX for chr${chr} (${server}) ==="
+
+    mkdir -p output
+
+    # G-NOMIX command (using pre-trained model)
+    # python3 gnomix.py <query_file> <output_folder> <chr_nr> <phase> <model_path>
+    python3 \${GNOMIX_PATH:-/opt/gnomix}/gnomix.py \\
+        ${vcf} \\
+        output/ \\
+        ${chr} \\
+        False \\
+        ${model_file} \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.gnomix.log
+
+    # Rename outputs with sample/server prefix
+    for f in output/*.msp.tsv; do
+        if [ -f "\$f" ]; then
+            mv "\$f" "output/${sample_id}_${server}_chr${chr}.msp.tsv"
+        fi
+    done
+
+    for f in output/*.fb.tsv; do
+        if [ -f "\$f" ]; then
+            mv "\$f" "output/${sample_id}_${server}_chr${chr}.fb.tsv"
+        fi
+    done
+
+    echo "=== G-NOMIX complete for chr${chr} ==="
+    """
+}
+
+/*
+ * Process 6D: RFMix v1 Local Ancestry Inference (OPTIONAL - Legacy)
+ * Original RFMix implementation with PopPhased
+ * Note: Requires different input format (binary alleles)
+ * Reference: https://sites.google.com/site/rfmixlocalancestryinference/
+ */
+process RFMIX_V1 {
+    tag "${sample_id}_${server}_chr${chr}"
+    label 'process_high'
+    publishDir "${params.outdir}/module7/03_local_ancestry/rfmix_v1/${server}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(server), path(vcf), path(index), val(chr)
+    path(reference_alleles)   // Binary alleles file
+    path(reference_classes)   // Population labels
+    path(marker_locations)    // SNP positions in genetic distance
+
+    when:
+    params.lai_methods.contains('rfmix1')
+
+    output:
+    tuple val(sample_id), val(server), val(chr),
+          path("${sample_id}_${server}_chr${chr}.0.Viterbi.txt"),
+          path("${sample_id}_${server}_chr${chr}.allelesRephased0.txt"), emit: results
+    path("${sample_id}_${server}_chr${chr}.rfmix1.log"), emit: log
+
+    script:
+    """
+    echo "=== Running RFMix v1 for chr${chr} (${server}) ==="
+
+    # First convert VCF to RFMix v1 binary alleles format
+    # This requires a helper script
+    echo "Converting VCF to binary alleles format..."
+    python3 <<'PYSCRIPT'
+import gzip
+import sys
+
+# Read VCF and convert to binary alleles
+vcf_file = "${vcf}"
+with gzip.open(vcf_file, 'rt') if vcf_file.endswith('.gz') else open(vcf_file) as f:
+    alleles = []
+    for line in f:
+        if line.startswith('#'):
+            if line.startswith('#CHROM'):
+                samples = line.strip().split('\\t')[9:]
+        else:
+            fields = line.strip().split('\\t')
+            ref, alt = fields[3], fields[4]
+            gts = fields[9:]
+            for gt in gts:
+                gt_val = gt.split(':')[0]
+                if '|' in gt_val:
+                    a1, a2 = gt_val.split('|')
+                elif '/' in gt_val:
+                    a1, a2 = gt_val.split('/')
+                else:
+                    a1, a2 = '.', '.'
+                # Convert to binary (0/1)
+                alleles.append('0' if a1 == '0' else '1' if a1 == '1' else '9')
+                alleles.append('0' if a2 == '0' else '1' if a2 == '1' else '9')
+
+    # Write alleles file
+    with open('query_alleles.txt', 'w') as out:
+        out.write(' '.join(alleles) + '\\n')
+
+print("Conversion complete")
+PYSCRIPT
+
+    # Combine query with reference alleles
+    cat query_alleles.txt ${reference_alleles} > combined_alleles.txt
+
+    # RFMix v1 PopPhased command
+    # ./PopPhased/RFMix_PopPhased -a alleles -p classes -m markers -o output [options]
+    \${RFMIX_V1_PATH:-RFMix_PopPhased} \\
+        -a combined_alleles.txt \\
+        -p ${reference_classes} \\
+        -m ${marker_locations} \\
+        -o ${sample_id}_${server}_chr${chr} \\
+        -w 0.2 \\
+        -e 2 \\
+        --use-reference-panels-in-EM \\
+        --forward-backward \\
+        2>&1 | tee ${sample_id}_${server}_chr${chr}.rfmix1.log
+
+    echo "=== RFMix v1 complete for chr${chr} ==="
+    """
+}
+
+/*
  * Process 7: Summarize LAI Results (OPTIONAL)
  */
 process SUMMARIZE_LAI {
