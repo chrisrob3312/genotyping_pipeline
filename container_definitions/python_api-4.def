@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: python:3.10-slim
+
+%labels
+    Author Christina Robinson
+    Version 1.0
+    Description Python + imputationbot + terralab-cli for API-based imputation
+
+%help
+    This container provides:
+    - Python 3.10 with scientific computing libraries
+    - imputationbot: TOPMed Imputation Server API client
+    - terralab-cli: All of Us AnVIL API client
+    - requests, pandas, numpy for data processing
+    
+    Used in Modules 2 and 5 (Imputation and Re-Imputation)
+
+%post
+    # Update and install system dependencies
+    apt-get update && apt-get install -y \
+        curl \
+        wget \
+        git \
+        build-essential \
+        && rm -rf /var/lib/apt/lists/*
+    
+    # Upgrade pip
+    pip install --no-cache-dir --upgrade pip setuptools wheel
+    
+    # Install imputationbot (TOPMed API client)
+    pip install --no-cache-dir imputationbot
+    
+    # Install terralab CLI (All of Us AnVIL API client)
+    pip install --no-cache-dir terralab
+    
+    # Install scientific computing libraries
+    pip install --no-cache-dir \
+        requests \
+        pandas \
+        numpy \
+        scipy \
+        pyyaml \
+        jinja2
+    
+    # Verify installations
+    echo "=== Verifying installations ==="
+    python --version || echo "ERROR: Python installation failed"
+    imputationbot --version || echo "ERROR: imputationbot installation failed"
+    terralab --version || echo "ERROR: terralab installation failed"
+    python -c "import requests; print('requests:', requests.__version__)" || echo "ERROR: requests import failed"
+    python -c "import pandas; print('pandas:', pandas.__version__)" || echo "ERROR: pandas import failed"
+    python -c "import numpy; print('numpy:', numpy.__version__)" || echo "ERROR: numpy import failed"
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%runscript
+    echo "Python API container (imputationbot + terralab)"
+    echo "Available commands: python, imputationbot, terralab"
+    exec "$@"
+
+%test
+    # Test all critical tools
+    python --version
+    imputationbot --version
+    terralab --version
+    python -c "import requests, pandas, numpy"
