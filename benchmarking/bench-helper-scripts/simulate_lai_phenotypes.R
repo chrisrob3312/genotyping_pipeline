@@ -104,11 +104,8 @@ lai_scenarios <- list(
     lai_opposite = list(
         description = "Opposite effects on AFR vs EUR backgrounds (masks in std GWAS)",
         effect_by_lai = function(lai) {
-            case_when(
-                lai == 0 ~ 1.0,   # AFR: positive effect
-                lai == 1 ~ -1.0, # EUR: negative effect
-                TRUE ~ 0.0       # Other: no effect
-            )
+            # AFR: positive effect, EUR: negative effect, Other: no effect
+            ifelse(lai == 0, 1.0, ifelse(lai == 1, -1.0, 0.0))
         },
         expected_tractor_advantage = "Very high - standard GWAS shows ~0 effect"
     ),
@@ -118,12 +115,8 @@ lai_scenarios <- list(
         description = "Effect size varies continuously with local ancestry dosage",
         effect_by_lai = function(lai) {
             # Stronger effect on AFR background, weaker on EUR
-            case_when(
-                lai == 0 ~ 1.5,   # AFR
-                lai == 1 ~ 0.5,   # EUR
-                lai == 2 ~ 1.0,   # NAT (intermediate)
-                TRUE ~ 0.0
-            )
+            # AFR: 1.5, EUR: 0.5, NAT: 1.0, Other: 0.0
+            ifelse(lai == 0, 1.5, ifelse(lai == 1, 0.5, ifelse(lai == 2, 1.0, 0.0)))
         },
         expected_tractor_advantage = "Moderate - effect visible but attenuated in std GWAS"
     ),

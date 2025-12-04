@@ -441,7 +441,7 @@ if ($outpath)
  $plotfile = File::Spec->catfile($abs_outpath, 'FreqPlot-'.$file_stem.'-'.$referenceused.'.txt');
  }
 print "$plotfile\n";
-open PL, ">$plotfile" or dir $!;
+open PL, ">$plotfile" or die $!;
 
 print L "Version $version\n\n";
 print L "Options Set:\n";
