@@ -332,18 +332,24 @@ Builds all required Apptainer/Singularity containers from definition files.
 ## Citation
 
 If you use this pipeline, please cite:
+
+
+---
+## References
+
+- Post-imputation QC Benchmarking 
+- 2-Step Imputation Genotyping Merge Method
 - TOPMed Imputation Server
-- All of Us Research Program (if used)
+- All of Us Research Program Imputation Panel
+- PLINK1.9
+- PLINK2.0
+- Will Rayner/Mcarthy Tools Strand Checking
 - MagicalRsq-X
 - GRAF-anc
 - ADMIXTURE
-- RFMix (if LAI used)
-
----
-
-## Support
-
-For issues and feature requests, please open an issue on GitHub.
+- RFMix
+- FLARE
+- G-nomix
 
 ---
 
