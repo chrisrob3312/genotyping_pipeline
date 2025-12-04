@@ -8,14 +8,39 @@ This framework compares **6 imputation approaches** across **3 imputation server
 
 ## Approaches Compared
 
+### Traditional Approaches (Shell Scripts)
+
 | Approach | QC Timing | Merge Strategy | Description |
 |----------|-----------|----------------|-------------|
-| **A** | Before imputation | Intersect before | Traditional: QC → Intersect → Impute → R² filter |
-| **B** | After imputation | Intersect after | Minimal prep → Impute → QC after |
-| **C** | Before imputation | Separate platforms | Thorough QC → Impute each platform → Merge |
-| **D** | After imputation | Separate platforms | Minimal prep → Impute each → QC after → Merge |
-| **E (Ours)** | Minimal before, thorough after | Union merge | Our pipeline with MagicalRsq-X 2-step filtering |
-| **F (Ours+)** | Same as E | Union + re-impute | Our pipeline with optional re-imputation step |
+| **A** | Before imputation | Intersect before | Traditional: Thorough QC → Intersect → Impute → R² filter |
+| **B** | After imputation | Intersect after | Minimal prep → Impute → Intersect → Thorough QC after |
+| **C** | Before imputation | Separate platforms | Thorough QC → Impute each platform separately → Merge after |
+| **D** | After imputation | Separate platforms | Minimal prep → Impute each separately → Thorough QC → Merge |
+
+### Our Pipeline Variants
+
+| Approach | QC Timing | Merge Strategy | Description |
+|----------|-----------|----------------|-------------|
+| **E (Ours-1step)** | After imputation | Union within platform | Union merge → Impute → Intersect merge → MagicalRsq-X → Thorough QC |
+| **F (Ours-2step)** | After imputation | Union + re-impute | Union merge → Impute → Intersect merge → Re-impute → MagicalRsq-X → Thorough QC |
+
+### Key Differences in Our Pipeline
+
+```
+TRADITIONAL (Approach A):
+  Intersect across platforms → Thorough QC → Impute → R² filter (0.3 or 0.8)
+  ❌ Loses platform-specific variants before imputation
+  ❌ HWE/MAF filters remove valid admixed population variants
+  ❌ Static R² threshold not calibrated for ancestry
+
+OUR PIPELINE (Approach E/F):
+  Union merge within platform → Minimal QC → Impute → Intersect merge →
+  [Optional: Re-impute] → MagicalRsq-X filter → Thorough QC
+  ✓ Preserves all platform variants until after imputation
+  ✓ QC after imputation catches true errors, not population structure
+  ✓ MagicalRsq-X provides ancestry-calibrated quality scores
+  ✓ 2-step imputation recovers variants lost in intersect merge
+```
 
 ## Imputation Servers Tested
 
@@ -68,19 +93,20 @@ benchmarking/
 ├── download_benchmark_data.sh     # Download public test data + WGS truth
 ├── run_all_benchmarks.sh          # Master script to run all approaches
 │
-├── alternative_approaches/        # Shell script pipelines (non-Nextflow)
-│   ├── approach_a_michigan.sh     # Approach A + Michigan
-│   ├── approach_a_topmed.sh       # Approach A + TOPMed
-│   ├── approach_a_allofus.sh      # Approach A + All of Us
-│   ├── approach_b_michigan.sh     # Approach B + Michigan
-│   ├── approach_b_topmed.sh       # Approach B + TOPMed
-│   ├── approach_b_allofus.sh      # Approach B + All of Us
-│   ├── approach_c_michigan.sh     # Approach C + Michigan
-│   ├── approach_c_topmed.sh       # Approach C + TOPMed
-│   ├── approach_c_allofus.sh      # Approach C + All of Us
-│   ├── approach_d_michigan.sh     # Approach D + Michigan
-│   ├── approach_d_topmed.sh       # Approach D + TOPMed
-│   └── approach_d_allofus.sh      # Approach D + All of Us
+├── alternative_approaches/        # Shell script pipelines (Traditional)
+│   ├── approach_a_michigan.sh     # A: QC before + Intersect + Michigan/1KG
+│   ├── approach_a_topmed.sh       # A: QC before + Intersect + TOPMed
+│   ├── approach_a_allofus.sh      # A: QC before + Intersect + All of Us
+│   ├── approach_b_topmed.sh       # B: QC after + Intersect + TOPMed
+│   ├── approach_c_topmed.sh       # C: QC before + Separate platforms + TOPMed
+│   ├── approach_d_topmed.sh       # D: QC after + Separate platforms + TOPMed
+│   └── common_functions.sh        # Shared QC/processing functions
+│
+├── our_pipeline_variants/         # Our pipeline test configurations
+│   ├── ours_1step_topmed.config   # E: Union + 1 imputation + MagicalRsq-X
+│   ├── ours_1step_allofus.config  # E: Union + 1 imputation + MagicalRsq-X
+│   ├── ours_2step_topmed.config   # F: Union + 2-step imputation + MagicalRsq-X
+│   └── ours_2step_allofus.config  # F: Union + 2-step imputation + MagicalRsq-X
 │
 ├── bench-helper-scripts/          # Comparison and metrics scripts
 │   ├── calculate_concordance.R    # Calculate concordance with WGS
