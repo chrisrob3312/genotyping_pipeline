@@ -4,19 +4,21 @@
 #
 # Downloads and organizes reference files needed for the genotyping pipeline:
 #   - Chain files (liftover between hg19/hg38)
-#   - TOPMed/HRC reference files for imputation QC (Rayner/McCarthy format)
-#   - Genetic maps for phasing and LAI
+#   - BRAVO Freeze 10 VCFs → Rayner format for imputation QC
+#   - Genetic maps from TractorWorkflow (SHAPEIT5/RFMix2 formats)
 #   - Reference genome FASTA files
+#   - HRC reference for hg19 fallback
 #
-# Run on HPC, then copy formatted data to pipeline resources/ directory
+# NOTE: LAI reference panel (HGDP-1KG + MX Biobank) is user-provided
+#       Use format_reference_panel.sh to convert your custom reference
 #
 # Usage:
 #   ./setup_reference_files.sh --output-dir /path/to/references
 #
 # Requirements:
-#   - wget or curl
-#   - gunzip, unzip
-#   - ~50GB disk space for all references
+#   - wget, curl
+#   - bcftools (for BRAVO VCF processing)
+#   - ~100GB disk space for all references
 #
 ################################################################################
 
@@ -26,31 +28,67 @@ set -euo pipefail
 # Configuration
 # =============================================================================
 
-# Default output directory
 OUTPUT_DIR="${OUTPUT_DIR:-./pipeline_references}"
+THREADS="${THREADS:-4}"
+SKIP_BRAVO="${SKIP_BRAVO:-false}"
 
-# Parse arguments
+# BRAVO Freeze 10 base URL (requires visiting https://bravo.sph.umich.edu/vcfs.html for signed URLs)
+BRAVO_BASE="https://bravo.sph.umich.edu"
+
+# TractorWorkflow reference data
+TRACTOR_REPO="https://github.com/Atkinson-Lab/TractorWorkflow"
+TRACTOR_TESTDATA="https://github.com/Atkinson-Lab/Tractor-tutorial/raw/refs/heads/main/test_data.zip"
+
+# =============================================================================
+# Parse Arguments
+# =============================================================================
+
+print_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Downloads reference files for the genotyping pipeline.
+
+Options:
+  -o, --output-dir DIR   Output directory (default: ./pipeline_references)
+  -t, --threads N        Threads for processing (default: 4)
+  --skip-bravo           Skip BRAVO download (use if already downloaded)
+  -h, --help             Show this help
+
+Reference Sources:
+  - Chain files:    UCSC Genome Browser
+  - TOPMed (hg38):  BRAVO Freeze 10 (https://bravo.sph.umich.edu/vcfs.html)
+  - HRC (hg19):     Will Rayner's site
+  - Genetic maps:   TractorWorkflow / SHAPEIT5
+  - FASTA:          1000 Genomes / NCBI
+
+NOTE: LAI reference (HGDP-1KG + custom samples) must be formatted separately
+      using format_reference_panel.sh with your WGS reference data.
+
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         -o|--output-dir)
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        -t|--threads)
+            THREADS="$2"
+            shift 2
+            ;;
+        --skip-bravo)
+            SKIP_BRAVO=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--output-dir DIR]"
-            echo ""
-            echo "Downloads reference files for the genotyping pipeline:"
-            echo "  - Chain files (hg19 <-> hg38)"
-            echo "  - TOPMed/HRC strand files (Rayner format)"
-            echo "  - Genetic maps"
-            echo "  - Reference FASTA files"
-            echo ""
-            echo "Options:"
-            echo "  -o, --output-dir DIR   Output directory (default: ./pipeline_references)"
+            print_usage
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
+            print_usage
             exit 1
             ;;
     esac
@@ -60,10 +98,10 @@ echo "=============================================="
 echo "Genotyping Pipeline Reference File Setup"
 echo "=============================================="
 echo "Output directory: ${OUTPUT_DIR}"
+echo "Threads: ${THREADS}"
 echo ""
 
-# Create directory structure
-mkdir -p "${OUTPUT_DIR}"/{chain_files,strand_files,genetic_maps,fasta,checksums}
+mkdir -p "${OUTPUT_DIR}"/{chain_files,bravo_vcfs,rayner_refs,genetic_maps,fasta,tractor_refs}
 
 cd "${OUTPUT_DIR}"
 
@@ -72,311 +110,199 @@ cd "${OUTPUT_DIR}"
 # =============================================================================
 
 echo ""
-echo "=== Downloading Chain Files ==="
+echo "=== 1. Downloading Chain Files ==="
 echo ""
 
 cd chain_files
 
-# hg19 to hg38
-if [ ! -f hg19ToHg38.over.chain.gz ]; then
-    echo "Downloading hg19 to hg38 chain file..."
-    wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz
+for chain in "hg19ToHg38" "hg38ToHg19"; do
+    if [ ! -f "${chain}.over.chain.gz" ]; then
+        build=$(echo $chain | cut -d'T' -f1)
+        echo "Downloading ${chain}.over.chain.gz..."
+        wget -q -c "https://hgdownload.soe.ucsc.edu/goldenPath/${build}/liftOver/${chain}.over.chain.gz" || \
+            echo "Warning: Could not download ${chain}"
+    else
+        echo "${chain}.over.chain.gz exists, skipping..."
+    fi
+done
+
+cd "${OUTPUT_DIR}"
+
+# =============================================================================
+# 2. BRAVO FREEZE 10 (TOPMed hg38)
+# =============================================================================
+
+echo ""
+echo "=== 2. BRAVO Freeze 10 (TOPMed hg38 Reference) ==="
+echo ""
+
+if [ "$SKIP_BRAVO" = "true" ]; then
+    echo "Skipping BRAVO download (--skip-bravo flag set)"
 else
-    echo "hg19ToHg38.over.chain.gz already exists, skipping..."
+    cat << 'BRAVO_INSTRUCTIONS'
+--------------------------------------------------------------------------------
+BRAVO Freeze 10 VCF Download Instructions
+--------------------------------------------------------------------------------
+
+The BRAVO VCF files require signed URLs that expire after 15 minutes.
+You must download them manually from:
+
+    https://bravo.sph.umich.edu/vcfs.html
+
+Steps:
+1. Visit the URL above in your browser
+2. Right-click each chromosome link and copy the URL
+3. Download using wget/curl (URLs are time-limited)
+
+Example for chromosome 1:
+    wget -O bravo_vcfs/chr1.bravo.pub.vcf.gz "PASTE_SIGNED_URL_HERE"
+
+After downloading all chromosomes (1-22, X), run:
+    ./helper_scripts/convert_bravo_to_rayner.sh \
+        --input-dir bravo_vcfs/ \
+        --output rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz
+
+Alternative: Use the existing Freeze 5 reference from Will Rayner's site:
+    wget -P rayner_refs/ https://www.chg.ox.ac.uk/~wrayner/tools/PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz
+
+--------------------------------------------------------------------------------
+BRAVO_INSTRUCTIONS
+
+    # Create download helper script
+    cat > bravo_vcfs/download_bravo.sh << 'DOWNLOAD_SCRIPT'
+#!/bin/bash
+# Download BRAVO Freeze 10 VCFs
+# Run this script after getting signed URLs from https://bravo.sph.umich.edu/vcfs.html
+
+echo "Paste the signed URLs for each chromosome when prompted"
+echo "URLs expire after 15 minutes, so download quickly"
+echo ""
+
+for chr in {1..22} X; do
+    if [ ! -f "chr${chr}.bravo.pub.vcf.gz" ]; then
+        echo "Enter URL for chromosome ${chr}:"
+        read -r url
+        if [ -n "$url" ]; then
+            wget -O "chr${chr}.bravo.pub.vcf.gz" "$url"
+        fi
+    else
+        echo "chr${chr}.bravo.pub.vcf.gz exists, skipping..."
+    fi
+done
+
+echo "Download complete. Now run convert_bravo_to_rayner.sh"
+DOWNLOAD_SCRIPT
+    chmod +x bravo_vcfs/download_bravo.sh
 fi
 
-# hg38 to hg19
-if [ ! -f hg38ToHg19.over.chain.gz ]; then
-    echo "Downloading hg38 to hg19 chain file..."
-    wget -c https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz
-else
-    echo "hg38ToHg19.over.chain.gz already exists, skipping..."
-fi
-
-# GRCh37 to GRCh38 (Ensembl - sometimes needed for VCF liftover)
-if [ ! -f GRCh37_to_GRCh38.chain.gz ]; then
-    echo "Downloading GRCh37 to GRCh38 chain file (Ensembl)..."
-    wget -c https://ftp.ensembl.org/pub/assembly_mapping/homo_sapiens/GRCh37_to_GRCh38.chain.gz || \
-        echo "Warning: Ensembl chain file not available, using UCSC version"
+# Download Freeze 5 as fallback/alternative
+cd rayner_refs
+if [ ! -f "PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz" ]; then
+    echo "Downloading TOPMed Freeze 5 reference (fallback)..."
+    wget -q -c "https://www.chg.ox.ac.uk/~wrayner/tools/PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz" || \
+        echo "Warning: Could not download Freeze 5 reference"
 fi
 
 cd "${OUTPUT_DIR}"
 
 # =============================================================================
-# 2. STRAND/REFERENCE FILES (Rayner/McCarthy Format for Imputation QC)
+# 3. HRC REFERENCE (hg19/GRCh37)
 # =============================================================================
 
 echo ""
-echo "=== Downloading Strand Files (Rayner/McCarthy Format) ==="
+echo "=== 3. HRC Reference (hg19/GRCh37) ==="
 echo ""
 
-cd strand_files
+cd rayner_refs
 
-# -----------------------------------------------------------------------------
-# TOPMed Reference (hg38) - Primary for TOPMed imputation
-# -----------------------------------------------------------------------------
-echo ""
-echo "--- TOPMed Reference Files (hg38) ---"
-
-mkdir -p topmed_hg38
-cd topmed_hg38
-
-# TOPMed reference allele frequencies and strand info
-# From: https://www.well.ox.ac.uk/~wrayner/tools/
-if [ ! -f PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz ]; then
-    echo "Downloading TOPMed freeze5 hg38 reference..."
-    wget -c https://www.well.ox.ac.uk/~wrayner/tools/PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz || {
-        echo "Direct download failed, trying alternative..."
-        # Alternative: Create from TOPMed VCF if direct download fails
-        echo "NOTE: You may need to generate this from TOPMed reference VCF"
-        echo "See: https://www.well.ox.ac.uk/~wrayner/tools/"
-    }
-fi
-
-cd "${OUTPUT_DIR}/strand_files"
-
-# -----------------------------------------------------------------------------
-# HRC Reference (hg19/GRCh37) - For HRC imputation
-# -----------------------------------------------------------------------------
-echo ""
-echo "--- HRC Reference Files (hg19/GRCh37) ---"
-
-mkdir -p hrc_hg19
-cd hrc_hg19
-
-if [ ! -f HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz ]; then
+if [ ! -f "HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz" ]; then
     echo "Downloading HRC r1.1 reference..."
-    wget -c ftp://ngs.sanger.ac.uk/production/hrc/HRC.r1-1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz || {
-        echo "Primary source failed, trying alternative..."
-        wget -c https://www.well.ox.ac.uk/~wrayner/tools/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz || \
-            echo "Warning: Could not download HRC reference"
-    }
+    wget -q -c "ftp://ngs.sanger.ac.uk/production/hrc/HRC.r1-1/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz" 2>/dev/null || \
+    wget -q -c "https://www.chg.ox.ac.uk/~wrayner/tools/HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz" || \
+        echo "Warning: Could not download HRC reference"
+else
+    echo "HRC reference exists, skipping..."
 fi
-
-cd "${OUTPUT_DIR}/strand_files"
-
-# -----------------------------------------------------------------------------
-# 1000 Genomes Reference (hg19) - Fallback reference
-# -----------------------------------------------------------------------------
-echo ""
-echo "--- 1000 Genomes Reference Files (hg19) ---"
-
-mkdir -p 1kg_hg19
-cd 1kg_hg19
-
-if [ ! -f 1000GP_Phase3_combined.legend.gz ]; then
-    echo "Downloading 1000G Phase 3 legend files..."
-    # These are used by some tools for strand checking
-    for chr in {1..22}; do
-        wget -c https://mathgen.stats.ox.ac.uk/impute/1000GP_Phase3/1000GP_Phase3_chr${chr}.legend.gz || true
-    done
-fi
-
-cd "${OUTPUT_DIR}/strand_files"
-
-# -----------------------------------------------------------------------------
-# Illumina/Affymetrix Strand Files
-# -----------------------------------------------------------------------------
-echo ""
-echo "--- Array-Specific Strand Files ---"
-
-mkdir -p array_strand_files
-cd array_strand_files
-
-# Download Will Rayner's strand files for common arrays
-# https://www.well.ox.ac.uk/~wrayner/strand/
-
-STRAND_BASE="https://www.well.ox.ac.uk/~wrayner/strand"
-
-# Common Illumina arrays
-declare -a ILLUMINA_ARRAYS=(
-    "HumanOmni2.5-8v1-Multi"
-    "HumanOmni2.5-8v1_A"
-    "HumanOmniExpress-24v1-0_A"
-    "HumanOmniExpress-24v1-1_A"
-    "Multi-EthnicGlobal_A1"
-    "InfiniumOmni5-4v1-2_A1"
-    "HumanCoreExome-24v1-0_A"
-    "HumanCore-24v1-0_A"
-    "GSA-24v3-0_A1"
-    "GSA-24v2-0_A1"
-)
-
-# Common Affymetrix arrays
-declare -a AFFY_ARRAYS=(
-    "Axiom_PMRA.na35"
-    "Axiom_UKB_WCSG"
-    "Axiom_GW_ASI_SNP"
-    "Axiom_GW_AFR_SNP"
-    "Axiom_GW_LAT_SNP"
-    "Axiom_GW_EU_SNP"
-    "GenomeWideSNP_6"
-)
-
-echo "Downloading Illumina strand files..."
-for array in "${ILLUMINA_ARRAYS[@]}"; do
-    if [ ! -f "${array}-b37-strand.zip" ] && [ ! -f "${array}-b37.strand" ]; then
-        wget -c "${STRAND_BASE}/${array}-b37-strand.zip" 2>/dev/null || \
-            echo "  Note: ${array} strand file not available"
-    fi
-done
-
-echo "Downloading Affymetrix strand files..."
-for array in "${AFFY_ARRAYS[@]}"; do
-    if [ ! -f "${array}-b37-strand.zip" ] && [ ! -f "${array}.strand" ]; then
-        wget -c "${STRAND_BASE}/${array}-b37-strand.zip" 2>/dev/null || \
-            echo "  Note: ${array} strand file not available"
-    fi
-done
-
-# Unzip strand files
-for zip in *.zip; do
-    [ -f "$zip" ] && unzip -o "$zip" && rm "$zip"
-done 2>/dev/null || true
 
 cd "${OUTPUT_DIR}"
 
 # =============================================================================
-# 3. GENETIC MAPS (for Phasing and LAI)
+# 4. GENETIC MAPS (from TractorWorkflow)
 # =============================================================================
 
 echo ""
-echo "=== Downloading Genetic Maps ==="
+echo "=== 4. Genetic Maps (TractorWorkflow / SHAPEIT5) ==="
 echo ""
 
 cd genetic_maps
 
-# -----------------------------------------------------------------------------
-# SHAPEIT4/Eagle genetic maps (GRCh37/hg19)
-# -----------------------------------------------------------------------------
-echo "--- GRCh37/hg19 Genetic Maps ---"
+# Download TractorWorkflow test data which includes genetic maps
+if [ ! -d "tractor_maps" ]; then
+    echo "Downloading TractorWorkflow reference files..."
 
-mkdir -p hg19
-cd hg19
-
-if [ ! -f genetic_map_chr1_combined_b37.txt ]; then
-    echo "Downloading SHAPEIT4 genetic maps (b37)..."
-
-    # Try SHAPEIT4 GitHub first
-    wget -c https://github.com/odelaneau/shapeit4/raw/master/maps/genetic_maps.b37.tar.gz 2>/dev/null && \
-        tar -xzf genetic_maps.b37.tar.gz && rm genetic_maps.b37.tar.gz || {
-
-        # Fallback to Eagle maps
-        echo "Trying Eagle genetic maps..."
-        wget -c https://storage.googleapis.com/broad-alkesgroup-public/Eagle/downloads/tables/genetic_map_hg19_withX.txt.gz && \
-            gunzip genetic_map_hg19_withX.txt.gz
-    }
+    wget -q -c "$TRACTOR_TESTDATA" -O tractor_test_data.zip && \
+        unzip -q -o tractor_test_data.zip && \
+        mv test_data/references tractor_maps && \
+        rm -rf test_data tractor_test_data.zip || \
+        echo "Warning: Could not download TractorWorkflow data"
 fi
 
-# Also get HapMap genetic maps (used by some older tools)
-if [ ! -f genetic_map_GRCh37_chr1.txt ]; then
-    echo "Downloading HapMap genetic maps..."
-    wget -c https://github.com/odelaneau/shapeit4/raw/master/maps/genetic_maps.b37.tar.gz 2>/dev/null || true
-fi
+# Also download SHAPEIT5 genetic maps for all chromosomes
+mkdir -p shapeit5_b37 shapeit5_b38
 
-cd "${OUTPUT_DIR}/genetic_maps"
+echo "Downloading SHAPEIT5 genetic maps (b37)..."
+wget -q -c "https://github.com/odelaneau/shapeit5/raw/main/maps/genetic_maps.b37.tar.gz" -O shapeit5_b37.tar.gz && \
+    tar -xzf shapeit5_b37.tar.gz -C shapeit5_b37 --strip-components=1 && \
+    rm shapeit5_b37.tar.gz || \
+    echo "Warning: Could not download b37 maps"
 
-# -----------------------------------------------------------------------------
-# GRCh38/hg38 Genetic Maps
-# -----------------------------------------------------------------------------
-echo "--- GRCh38/hg38 Genetic Maps ---"
-
-mkdir -p hg38
-cd hg38
-
-if [ ! -f genetic_map_chr1_combined_b38.txt ]; then
-    echo "Downloading SHAPEIT4 genetic maps (b38)..."
-
-    wget -c https://github.com/odelaneau/shapeit4/raw/master/maps/genetic_maps.b38.tar.gz 2>/dev/null && \
-        tar -xzf genetic_maps.b38.tar.gz && rm genetic_maps.b38.tar.gz || {
-
-        echo "Trying Eagle hg38 maps..."
-        wget -c https://storage.googleapis.com/broad-alkesgroup-public/Eagle/downloads/tables/genetic_map_hg38_withX.txt.gz && \
-            gunzip genetic_map_hg38_withX.txt.gz
-    }
-fi
+echo "Downloading SHAPEIT5 genetic maps (b38)..."
+wget -q -c "https://github.com/odelaneau/shapeit5/raw/main/maps/genetic_maps.b38.tar.gz" -O shapeit5_b38.tar.gz && \
+    tar -xzf shapeit5_b38.tar.gz -C shapeit5_b38 --strip-components=1 && \
+    rm shapeit5_b38.tar.gz || \
+    echo "Warning: Could not download b38 maps"
 
 cd "${OUTPUT_DIR}"
 
 # =============================================================================
-# 4. REFERENCE FASTA FILES
+# 5. REFERENCE FASTA FILES
 # =============================================================================
 
 echo ""
-echo "=== Downloading Reference FASTA Files ==="
+echo "=== 5. Reference FASTA Files ==="
 echo ""
 
 cd fasta
 
-# -----------------------------------------------------------------------------
-# GRCh37/hg19 Reference
-# -----------------------------------------------------------------------------
-echo "--- GRCh37/hg19 Reference ---"
-
+# GRCh37/hg19
 mkdir -p hg19
 cd hg19
+if [ ! -f "human_g1k_v37.fasta" ]; then
+    echo "Downloading GRCh37 reference..."
+    wget -q -c "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz" && \
+        gunzip human_g1k_v37.fasta.gz || \
+        echo "Warning: Could not download GRCh37 reference"
 
-if [ ! -f human_g1k_v37.fasta ]; then
-    echo "Downloading GRCh37 reference (1000 Genomes version)..."
-    wget -c ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz && \
-        gunzip human_g1k_v37.fasta.gz
-
-    # Create index
-    if command -v samtools &> /dev/null; then
+    if command -v samtools &> /dev/null && [ -f human_g1k_v37.fasta ]; then
         echo "Creating FASTA index..."
         samtools faidx human_g1k_v37.fasta
     fi
 fi
+cd ..
 
-cd "${OUTPUT_DIR}/fasta"
-
-# -----------------------------------------------------------------------------
-# GRCh38/hg38 Reference
-# -----------------------------------------------------------------------------
-echo "--- GRCh38/hg38 Reference ---"
-
+# GRCh38/hg38
 mkdir -p hg38
 cd hg38
-
-if [ ! -f GRCh38_full_analysis_set_plus_decoy_hla.fa ]; then
+if [ ! -f "GRCh38_full_analysis_set_plus_decoy_hla.fa" ]; then
     echo "Downloading GRCh38 reference..."
+    wget -q -c "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/GRCh38_reference_genome/GRCh38_full_analysis_set_plus_decoy_hla.fa" || \
+        echo "Warning: Could not download GRCh38 reference"
 
-    # Try 1000 Genomes version first
-    wget -c ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/GRCh38_reference_genome/GRCh38_full_analysis_set_plus_decoy_hla.fa 2>/dev/null || {
-
-        # Alternative: NCBI
-        echo "Trying NCBI reference..."
-        wget -c https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz && \
-            gunzip -c GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz > GRCh38_full_analysis_set_plus_decoy_hla.fa
-    }
-
-    # Create index
-    if command -v samtools &> /dev/null; then
+    if command -v samtools &> /dev/null && [ -f GRCh38_full_analysis_set_plus_decoy_hla.fa ]; then
         echo "Creating FASTA index..."
         samtools faidx GRCh38_full_analysis_set_plus_decoy_hla.fa
     fi
 fi
-
-cd "${OUTPUT_DIR}"
-
-# =============================================================================
-# 5. DOWNLOAD CHECKING TOOLS (McCarthy/Rayner)
-# =============================================================================
-
-echo ""
-echo "=== Downloading QC Tools ==="
-echo ""
-
-mkdir -p tools
-cd tools
-
-# HRC/1000G Imputation preparation checking tool
-if [ ! -f HRC-1000G-check-bim-v4.3.0.zip ]; then
-    echo "Downloading McCarthy/Rayner checking tool..."
-    wget -c https://www.well.ox.ac.uk/~wrayner/tools/HRC-1000G-check-bim-v4.3.0.zip && \
-        unzip -o HRC-1000G-check-bim-v4.3.0.zip
-fi
-
 cd "${OUTPUT_DIR}"
 
 # =============================================================================
@@ -385,11 +311,11 @@ cd "${OUTPUT_DIR}"
 
 echo ""
 echo "=== Creating Summary ==="
-echo ""
 
-cat > REFERENCE_FILES_README.txt << 'EOF'
+cat > README.txt << 'EOF'
+================================================================================
 Pipeline Reference Files
-========================
+================================================================================
 
 This directory contains reference files for the genotyping pipeline.
 
@@ -398,53 +324,61 @@ Directory Structure:
 
 chain_files/
 ├── hg19ToHg38.over.chain.gz      # Liftover hg19 → hg38
-├── hg38ToHg19.over.chain.gz      # Liftover hg38 → hg19
-└── GRCh37_to_GRCh38.chain.gz     # Ensembl chain file
+└── hg38ToHg19.over.chain.gz      # Liftover hg38 → hg19
 
-strand_files/
-├── topmed_hg38/                   # TOPMed reference (primary for imputation)
-│   └── PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz
-├── hrc_hg19/                      # HRC reference (GRCh37)
-│   └── HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz
-├── 1kg_hg19/                      # 1000 Genomes legend files
-│   └── 1000GP_Phase3_chr*.legend.gz
-└── array_strand_files/            # Array-specific strand files
-    └── *.strand
+bravo_vcfs/
+├── download_bravo.sh             # Helper script for BRAVO download
+└── chr*.bravo.pub.vcf.gz         # BRAVO Freeze 10 VCFs (manual download)
+
+rayner_refs/
+├── PASS.Variants.TOPMed_freeze10_hg38.tab.gz  # TOPMed Fr10 (from BRAVO)
+├── PASS.Variants.TOPMed_freeze5_hg38_dbSNP.tab.gz  # TOPMed Fr5 (fallback)
+└── HRC.r1-1.GRCh37.wgs.mac5.sites.tab.gz      # HRC for hg19
 
 genetic_maps/
-├── hg19/                          # GRCh37 genetic maps
-│   └── genetic_map_*_combined_b37.txt
-└── hg38/                          # GRCh38 genetic maps
-    └── genetic_map_*_combined_b38.txt
+├── shapeit5_b37/                 # SHAPEIT5 genetic maps (hg19)
+├── shapeit5_b38/                 # SHAPEIT5 genetic maps (hg38)
+└── tractor_maps/                 # TractorWorkflow format maps
+    ├── chr*.b37.gmap.gz          # SHAPEIT5 format
+    └── chr*.genetic_map.modified.txt  # RFMix2/GNomix format
 
 fasta/
-├── hg19/
-│   ├── human_g1k_v37.fasta       # GRCh37 reference
-│   └── human_g1k_v37.fasta.fai
-└── hg38/
-    ├── GRCh38_full_analysis_set_plus_decoy_hla.fa
-    └── GRCh38_full_analysis_set_plus_decoy_hla.fa.fai
+├── hg19/human_g1k_v37.fasta      # GRCh37 reference
+└── hg38/GRCh38_full_analysis_set_plus_decoy_hla.fa  # GRCh38 reference
 
-tools/
-└── HRC-1000G-check-bim-v4.3.0/   # McCarthy/Rayner checking tool
+
+BRAVO Freeze 10 Setup:
+----------------------
+
+1. Visit https://bravo.sph.umich.edu/vcfs.html
+2. Download all chromosome VCFs to bravo_vcfs/
+3. Run: ./helper_scripts/convert_bravo_to_rayner.sh \
+        --input-dir bravo_vcfs/ \
+        --output rayner_refs/PASS.Variants.TOPMed_freeze10_hg38.tab.gz
+
+
+LAI Reference Panel (User-Provided):
+------------------------------------
+
+Your HGDP-1KG + MX Biobank reference is NOT included here.
+Format it using:
+
+    ./helper_scripts/format_reference_panel.sh \
+        --input /path/to/your_reference.vcf.gz \
+        --sample-map /path/to/sample_populations.txt \
+        --genetic-map-dir genetic_maps/shapeit5_b38/ \
+        --output-dir ancestry_references/
 
 
 Copy to Pipeline:
 -----------------
 
-# Copy to your pipeline resources directory:
 cp -r chain_files/* /path/to/pipeline/resources/chain_files/
-cp -r strand_files/* /path/to/pipeline/resources/strand_files/
+cp -r rayner_refs/* /path/to/pipeline/resources/rayner/
 cp -r genetic_maps/* /path/to/pipeline/resources/genetic_maps/
 cp -r fasta/* /path/to/pipeline/resources/references/
 
-
-References:
------------
-- TOPMed: https://imputation.biodatacatalyst.nhlbi.nih.gov/
-- HRC: http://www.haplotype-reference-consortium.org/
-- Rayner tools: https://www.well.ox.ac.uk/~wrayner/tools/
-- Strand files: https://www.well.ox.ac.uk/~wrayner/strand/
+================================================================================
 EOF
 
 echo ""
@@ -452,19 +386,17 @@ echo "=============================================="
 echo "Reference File Setup Complete!"
 echo "=============================================="
 echo ""
-echo "Files downloaded to: ${OUTPUT_DIR}"
-echo ""
-echo "Summary saved to: ${OUTPUT_DIR}/REFERENCE_FILES_README.txt"
-echo ""
-echo "Next steps:"
-echo "  1. Copy files to pipeline resources/ directory"
-echo "  2. Run format_reference_panel.sh on your WGS reference data"
-echo "  3. Run create_test_data.sh to generate test datasets"
-echo ""
-
-# List what was downloaded
 echo "Downloaded files:"
-find "${OUTPUT_DIR}" -type f -name "*.gz" -o -name "*.fa" -o -name "*.fasta" -o -name "*.strand" -o -name "*.tab" 2>/dev/null | head -30
+find "${OUTPUT_DIR}" -type f \( -name "*.gz" -o -name "*.fa" -o -name "*.fasta" \) 2>/dev/null | head -20
 echo ""
 echo "Total size:"
 du -sh "${OUTPUT_DIR}"
+echo ""
+echo "IMPORTANT: For TOPMed Freeze 10 (BRAVO), follow instructions in:"
+echo "  ${OUTPUT_DIR}/README.txt"
+echo ""
+echo "Next steps:"
+echo "  1. Download BRAVO Freeze 10 VCFs (see bravo_vcfs/download_bravo.sh)"
+echo "  2. Convert BRAVO to Rayner format (see convert_bravo_to_rayner.sh)"
+echo "  3. Format your LAI reference (HGDP-1KG + MX Biobank) with format_reference_panel.sh"
+echo ""

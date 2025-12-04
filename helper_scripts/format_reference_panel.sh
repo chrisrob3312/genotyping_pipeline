@@ -5,12 +5,14 @@
 # Converts a phased WGS reference panel (PLINK or VCF) to all formats required
 # by the genotyping pipeline's LAI and ancestry tools:
 #
-#   - RFMix v2:   Phased VCF + sample map (tab-separated)
-#   - FLARE:      Phased VCF + panel file (space-separated)
-#   - RFMix v1:   .alleles, .classes, .snp_locations per chromosome
-#   - G-NOMIX:    Phased VCF + sample map (for training)
-#   - ADMIXTURE:  LD-pruned PLINK binary files
-#   - GRAF-anc:   Uses built-in reference (no conversion needed)
+#   - lai_reference/  SHARED: RFMix v2, FLARE, G-NOMIX (same VCF, different sample maps)
+#   - rfmix1/         RFMix v1: .alleles, .classes, .snp_locations per chromosome
+#   - admixture/      ADMIXTURE: LD-pruned PLINK binary files
+#   - GRAF-anc:       Uses built-in reference (no conversion needed)
+#
+# NOTE: RFMix v2, FLARE, and G-NOMIX all use the same phased VCF reference!
+#       Only the sample map format differs slightly between tools.
+#       This saves significant disk space by not duplicating the VCF.
 #
 # Usage:
 #   ./format_reference_panel.sh \
@@ -72,10 +74,8 @@ Sample Map Format:
     HG00403    CHS    EAS
 
 Output Formats Created:
-  rfmix2/           RFMix v2 format (VCF + sample_map.txt)
-  flare/            FLARE format (VCF + panels.txt)
+  lai_reference/    SHARED: RFMix v2, FLARE, G-NOMIX (single VCF, multiple sample maps)
   rfmix1/           RFMix v1 format (.alleles, .classes, .snp_locations)
-  gnomix/           G-NOMIX format (VCF + sample_map.tsv)
   admixture/        ADMIXTURE format (LD-pruned PLINK)
 
 EOF
@@ -162,7 +162,7 @@ echo "=============================================="
 # Create Output Directories
 # =============================================================================
 
-mkdir -p "${OUTPUT_DIR}"/{rfmix2,flare,rfmix1,gnomix,admixture,logs}
+mkdir -p "${OUTPUT_DIR}"/{lai_reference,rfmix1,admixture,logs}
 
 LOGDIR="${OUTPUT_DIR}/logs"
 
@@ -224,67 +224,54 @@ if [[ $NOT_IN_MAP -gt 0 ]]; then
 fi
 
 # =============================================================================
-# Step 1: RFMix v2 Format
+# Step 1: LAI Reference (Shared: RFMix v2, FLARE, G-NOMIX)
 # =============================================================================
 
 log ""
-log "=== Step 1: Creating RFMix v2 Format ==="
+log "=== Step 1: Creating LAI Reference (RFMix v2 / FLARE / G-NOMIX) ==="
+log "NOTE: These tools share the same VCF, only sample map format differs"
 
-RFMIX2_DIR="${OUTPUT_DIR}/rfmix2"
+LAI_DIR="${OUTPUT_DIR}/lai_reference"
 
-# Copy/link VCF (RFMix v2 uses VCF directly)
-log "Linking reference VCF..."
-if [[ "$INPUT_VCF" != "${RFMIX2_DIR}/reference_haplotypes.vcf.gz" ]]; then
-    ln -sf "$(readlink -f "$INPUT_VCF")" "${RFMIX2_DIR}/reference_haplotypes.vcf.gz"
+# Copy/link VCF (shared by all LAI tools)
+log "Linking reference VCF (shared by RFMix v2, FLARE, G-NOMIX)..."
+if [[ "$INPUT_VCF" != "${LAI_DIR}/reference_haplotypes.vcf.gz" ]]; then
+    ln -sf "$(readlink -f "$INPUT_VCF")" "${LAI_DIR}/reference_haplotypes.vcf.gz"
 
     # Copy or create index
     if [[ -f "${INPUT_VCF}.tbi" ]]; then
-        ln -sf "$(readlink -f "${INPUT_VCF}.tbi")" "${RFMIX2_DIR}/reference_haplotypes.vcf.gz.tbi"
+        ln -sf "$(readlink -f "${INPUT_VCF}.tbi")" "${LAI_DIR}/reference_haplotypes.vcf.gz.tbi"
     elif [[ -f "${INPUT_VCF}.csi" ]]; then
-        ln -sf "$(readlink -f "${INPUT_VCF}.csi")" "${RFMIX2_DIR}/reference_haplotypes.vcf.gz.csi"
+        ln -sf "$(readlink -f "${INPUT_VCF}.csi")" "${LAI_DIR}/reference_haplotypes.vcf.gz.csi"
     else
-        bcftools index "${RFMIX2_DIR}/reference_haplotypes.vcf.gz"
+        bcftools index "${LAI_DIR}/reference_haplotypes.vcf.gz"
     fi
 fi
 
-# Create sample map (tab-separated: SampleID<TAB>Population)
-log "Creating RFMix v2 sample map..."
-awk -F'\t' 'NR>0 && NF>=2 {print $1"\t"$2}' "$SAMPLE_MAP" > "${RFMIX2_DIR}/reference_sample_map.txt"
+# Create RFMix v2 sample map (tab-separated: SampleID<TAB>Population)
+log "Creating RFMix v2 sample map (tab-separated)..."
+awk -F'\t' 'NR>0 && NF>=2 {print $1"\t"$2}' "$SAMPLE_MAP" > "${LAI_DIR}/rfmix2_sample_map.txt"
+
+# Create FLARE panel file (space-separated: SampleID<SPACE>Population)
+log "Creating FLARE panel file (space-separated)..."
+awk -F'\t' 'NR>0 && NF>=2 {print $1" "$2}' "$SAMPLE_MAP" > "${LAI_DIR}/flare_panels.txt"
+
+# Create G-NOMIX sample map (tab-separated with header)
+log "Creating G-NOMIX sample map (with header)..."
+echo -e "Sample\tPopulation" > "${LAI_DIR}/gnomix_sample_map.tsv"
+awk -F'\t' 'NR>0 && NF>=2 {print $1"\t"$2}' "$SAMPLE_MAP" >> "${LAI_DIR}/gnomix_sample_map.tsv"
 
 # Count populations
-POPS=$(awk '{print $2}' "${RFMIX2_DIR}/reference_sample_map.txt" | sort -u | wc -l)
-log "RFMix v2 format complete: ${POPS} populations"
+POPS=$(awk '{print $2}' "${LAI_DIR}/rfmix2_sample_map.txt" | sort -u | wc -l)
+N_SAMPLES=$(wc -l < "${LAI_DIR}/rfmix2_sample_map.txt")
+log "LAI reference complete: ${N_SAMPLES} samples, ${POPS} populations"
 
 # =============================================================================
-# Step 2: FLARE Format
-# =============================================================================
-
-log ""
-log "=== Step 2: Creating FLARE Format ==="
-
-FLARE_DIR="${OUTPUT_DIR}/flare"
-
-# Link VCF (FLARE also uses VCF)
-ln -sf "$(readlink -f "$INPUT_VCF")" "${FLARE_DIR}/reference_haplotypes.vcf.gz"
-
-if [[ -f "${INPUT_VCF}.tbi" ]]; then
-    ln -sf "$(readlink -f "${INPUT_VCF}.tbi")" "${FLARE_DIR}/reference_haplotypes.vcf.gz.tbi"
-elif [[ -f "${INPUT_VCF}.csi" ]]; then
-    ln -sf "$(readlink -f "${INPUT_VCF}.csi")" "${FLARE_DIR}/reference_haplotypes.vcf.gz.csi"
-fi
-
-# Create panel file (space-separated: SampleID<SPACE>Population)
-log "Creating FLARE panel file..."
-awk -F'\t' 'NR>0 && NF>=2 {print $1" "$2}' "$SAMPLE_MAP" > "${FLARE_DIR}/flare_panels.txt"
-
-log "FLARE format complete"
-
-# =============================================================================
-# Step 3: RFMix v1 Format (Per Chromosome)
+# Step 2: RFMix v1 Format (Per Chromosome)
 # =============================================================================
 
 log ""
-log "=== Step 3: Creating RFMix v1 Format ==="
+log "=== Step 2: Creating RFMix v1 Format ==="
 
 RFMIX1_DIR="${OUTPUT_DIR}/rfmix1"
 
@@ -336,37 +323,11 @@ else
 fi
 
 # =============================================================================
-# Step 4: G-NOMIX Format
+# Step 3: ADMIXTURE Format (LD-Pruned PLINK)
 # =============================================================================
 
 log ""
-log "=== Step 4: Creating G-NOMIX Format ==="
-
-GNOMIX_DIR="${OUTPUT_DIR}/gnomix"
-
-# Link VCF
-ln -sf "$(readlink -f "$INPUT_VCF")" "${GNOMIX_DIR}/reference_haplotypes.vcf.gz"
-
-if [[ -f "${INPUT_VCF}.tbi" ]]; then
-    ln -sf "$(readlink -f "${INPUT_VCF}.tbi")" "${GNOMIX_DIR}/reference_haplotypes.vcf.gz.tbi"
-elif [[ -f "${INPUT_VCF}.csi" ]]; then
-    ln -sf "$(readlink -f "${INPUT_VCF}.csi")" "${GNOMIX_DIR}/reference_haplotypes.vcf.gz.csi"
-fi
-
-# Create sample map (tab-separated, with header for G-NOMIX)
-log "Creating G-NOMIX sample map..."
-echo -e "Sample\tPopulation" > "${GNOMIX_DIR}/sample_map.tsv"
-awk -F'\t' 'NR>0 && NF>=2 {print $1"\t"$2}' "$SAMPLE_MAP" >> "${GNOMIX_DIR}/sample_map.tsv"
-
-log "G-NOMIX format complete"
-log "NOTE: To use G-NOMIX, either download pre-trained models or train on this reference"
-
-# =============================================================================
-# Step 5: ADMIXTURE Format (LD-Pruned PLINK)
-# =============================================================================
-
-log ""
-log "=== Step 5: Creating ADMIXTURE Format ==="
+log "=== Step 3: Creating ADMIXTURE Format ==="
 
 ADMIX_DIR="${OUTPUT_DIR}/admixture"
 
@@ -404,11 +365,11 @@ awk 'NR==FNR {pop[$1]=$2; next} {print pop[$2]}' \
 log "ADMIXTURE format complete"
 
 # =============================================================================
-# Step 6: Copy Genetic Maps
+# Step 4: Copy Genetic Maps
 # =============================================================================
 
 log ""
-log "=== Step 6: Organizing Genetic Maps ==="
+log "=== Step 4: Organizing Genetic Maps ==="
 
 mkdir -p "${OUTPUT_DIR}/genetic_maps"
 cp -r "${GENETIC_MAP_DIR}"/* "${OUTPUT_DIR}/genetic_maps/" 2>/dev/null || \
@@ -445,29 +406,23 @@ Output Directory: ${OUTPUT_DIR}
 Created Formats:
 ----------------
 
-rfmix2/
-├── reference_haplotypes.vcf.gz     # Phased VCF
-├── reference_haplotypes.vcf.gz.tbi # Index
-└── reference_sample_map.txt        # Tab-separated: SampleID<TAB>Population
+lai_reference/                       # SHARED: RFMix v2, FLARE, G-NOMIX
+├── reference_haplotypes.vcf.gz      # Phased VCF (shared by all LAI tools)
+├── reference_haplotypes.vcf.gz.tbi  # Index
+├── rfmix2_sample_map.txt            # RFMix v2: Tab-separated (SampleID<TAB>Population)
+├── flare_panels.txt                 # FLARE: Space-separated (SampleID<SPACE>Population)
+└── gnomix_sample_map.tsv            # G-NOMIX: Tab-separated with header
 
-flare/
-├── reference_haplotypes.vcf.gz     # Phased VCF
-└── flare_panels.txt                # Space-separated: SampleID<SPACE>Population
-
-rfmix1/
-├── rfmix1_reference_chr1.alleles   # Binary alleles (one haplotype per line)
-├── rfmix1_reference_chr1.classes   # Population labels (space-separated)
+rfmix1/                              # RFMix v1 (legacy format, per chromosome)
+├── rfmix1_reference_chr1.alleles    # Binary alleles (one haplotype per line)
+├── rfmix1_reference_chr1.classes    # Population labels (space-separated)
 ├── rfmix1_reference_chr1.snp_locations  # Genetic positions (cM)
 └── ... (per chromosome)
 
-gnomix/
-├── reference_haplotypes.vcf.gz     # Phased VCF
-└── sample_map.tsv                  # Tab-separated with header
-
 admixture/
-├── reference_full.bed/bim/fam      # Full reference
-├── reference_ldpruned.bed/bim/fam  # LD-pruned for ADMIXTURE
-└── reference_ldpruned.pop          # Population labels for supervised mode
+├── reference_full.bed/bim/fam       # Full reference
+├── reference_ldpruned.bed/bim/fam   # LD-pruned for ADMIXTURE
+└── reference_ldpruned.pop           # Population labels for supervised mode
 
 genetic_maps/
 └── ... (per chromosome)
@@ -476,11 +431,9 @@ genetic_maps/
 Copy to Pipeline:
 -----------------
 
-cp -r ${OUTPUT_DIR}/rfmix2/* /path/to/pipeline/resources/ancestry_references/
-cp -r ${OUTPUT_DIR}/flare/* /path/to/pipeline/resources/ancestry_references/
-cp -r ${OUTPUT_DIR}/rfmix1/* /path/to/pipeline/resources/ancestry_references/
-cp -r ${OUTPUT_DIR}/gnomix/* /path/to/pipeline/resources/ancestry_references/
-cp -r ${OUTPUT_DIR}/admixture/* /path/to/pipeline/resources/ancestry_references/
+cp -r ${OUTPUT_DIR}/lai_reference/* /path/to/pipeline/resources/ancestry_references/lai_reference/
+cp -r ${OUTPUT_DIR}/rfmix1/* /path/to/pipeline/resources/ancestry_references/rfmix1/
+cp -r ${OUTPUT_DIR}/admixture/* /path/to/pipeline/resources/ancestry_references/admixture/
 cp -r ${OUTPUT_DIR}/genetic_maps/* /path/to/pipeline/resources/genetic_maps/
 
 EOF
