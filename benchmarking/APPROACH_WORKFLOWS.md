@@ -4,7 +4,7 @@
 
 | Factor | Options | Approaches |
 |--------|---------|------------|
-| **Merge timing** | BEFORE vs AFTER imputation | A,B,C = before; D,E,F = after |
+| **Merge timing** | BEFORE vs AFTER imputation | A,B = before; C,D,E,F = after |
 | **QC timing** | BEFORE vs AFTER imputation | A,C = before; B,D,E,F = after |
 | **Quality filter** | R² vs MagicalRsq-X | A,B,C,D = R²; E,F = MagicalRsq-X |
 
@@ -14,8 +14,8 @@
 |----------|--------------|-----------|--------|----------|
 | **A** | BEFORE impute | BEFORE impute (thorough) | R² > 0.3 | Traditional baseline |
 | **B** | BEFORE impute | AFTER impute (thorough) | R² > 0.3 | Southam 2011 - QC timing |
-| **C** | BEFORE impute (intersect first) | BEFORE impute | R² > 0.3 | Intersect order |
-| **D** | **AFTER impute** | AFTER impute | R² > 0.3 | **Same as ours but R² filter** |
+| **C** | **AFTER impute** | **BEFORE impute** (thorough) | R² > 0.3 | **QC before, merge after** |
+| **D** | AFTER impute | AFTER impute | R² > 0.3 | Same as ours but R² filter |
 | **E** | AFTER impute | AFTER impute | MagicalRsq-X | Our 1-step |
 | **F** | AFTER impute | AFTER impute | MagicalRsq-X ×2 | Our 2-step |
 
@@ -68,26 +68,27 @@ Platform 3 ──► Minimal QC ──┘
 
 ---
 
-## APPROACH C: Intersect First - Different Merge Order
+## APPROACH C: Thorough QC Before → Merge After Imputation
 
-**Philosophy**: Intersect variants FIRST, then QC on combined data.
+**Philosophy**: Apply thorough QC on each platform BEFORE imputation, impute separately, then merge.
+**KEY COMPARISON**: Same as D but with thorough QC BEFORE imputation instead of after.
 
 ```
-Platform 1 ──┐
-Platform 2 ──┼──► INTERSECT FIRST ──► Thorough QC ──► Ref Align ──► Impute ──► R² > 0.3 ──► Basic QC
-Platform 3 ──┘
-                  (find common       (on merged
-                   variants first)    data)
+Platform 1 ──► THOROUGH QC ──► Ref Align ──► Impute ──┐
+Platform 2 ──► THOROUGH QC ──► Ref Align ──► Impute ──┼──► INTERSECT/MERGE ──► R² > 0.3 ──► Light QC
+Platform 3 ──► THOROUGH QC ──► Ref Align ──► Impute ──┘
+              (before impute)              (separately)    (AFTER impute)    (traditional)   (call rate)
 ```
 
 **Steps:**
-1. INTERSECT variants across platforms FIRST (before any QC)
-2. Merge samples on common variants
-3. Thorough QC on merged data
-4. Reference alignment
-5. Liftover → Impute
-6. R² > 0.3 filter
-7. Basic post-imputation QC
+1. Per-platform THOROUGH QC (95% call rate, het, relatedness)
+2. Per-platform reference alignment
+3. Per-platform imputation (SEPARATELY)
+4. INTERSECT/MERGE across platforms (AFTER imputation)
+5. R² > 0.3 filter (traditional)
+6. Light post-imputation QC (call rate only - thorough was done before)
+
+**C vs D comparison**: Does QC timing matter? (before vs after imputation, both merge after)
 
 ---
 
@@ -166,11 +167,15 @@ Platform 3 ──► Min QC ──► Ref Align ──► IMPUTE 1 ──► Mag
 
 | Comparison | Question |
 |------------|----------|
-| **A vs B** | Does QC timing matter? (before vs after impute) |
-| **A vs C** | Does intersect-first order change results? |
-| **A/B/C vs D** | Does merge timing matter? (before vs after impute) |
+| **A vs B** | Does QC timing matter when merging BEFORE impute? |
+| **A/B vs C/D** | Does merge timing matter? (before vs after impute) |
+| **C vs D** | Does QC timing matter when merging AFTER impute? **(KEY)** |
 | **D vs E** | Does MagicalRsq-X improve over R²? **(KEY)** |
 | **E vs F** | Does 2-step re-imputation help? |
+
+### Merge Timing Groups
+- **Merge BEFORE** (A, B): Traditional approach - intersect variants first
+- **Merge AFTER** (C, D, E, F): Our approach - impute separately, then merge
 
 ---
 

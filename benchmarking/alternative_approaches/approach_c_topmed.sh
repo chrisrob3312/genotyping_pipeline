@@ -1,23 +1,26 @@
 #!/bin/bash
 ################################################################################
-# approach_c_intersect_first.sh
+# approach_c_topmed.sh
 #
-# APPROACH C: Intersect-first + QC-before-imputation + TOPMed
+# APPROACH C: Thorough QC BEFORE Imputation → Merge AFTER Imputation + TOPMed
 #
-# Key difference: Intersects variants ACROSS platforms/batches BEFORE any QC.
-# This ensures all platforms have identical variant sets but may lose
-# platform-specific variants that could be useful.
+# Philosophy: Apply thorough QC on each platform BEFORE imputation, impute
+# each platform separately, then merge AFTER imputation.
 #
-# Pipeline Steps:
-#   1. Intersect variants across all platforms/batches FIRST
-#   2. Apply thorough QC (HWE, MAF, call rate, het, relatedness)
-#   3. Submit intersected data to TOPMed
-#   4. Apply traditional R² filter
-#   5. Basic post-imputation QC
+# KEY COMPARISON:
+#   - C vs D: Thorough QC before (C) vs after (D) imputation
+#   - Both merge AFTER imputation
+#   - Shows effect of QC timing on imputation quality
+#
+# Workflow:
+#   Platform 1 → THOROUGH QC → Ref Align → Impute ─┐
+#   Platform 2 → THOROUGH QC → Ref Align → Impute ─┼─→ INTERSECT/MERGE → R² > 0.3 → QC after
+#   Platform 3 → THOROUGH QC → Ref Align → Impute ─┘
+#                (before impute)          (separately)  (AFTER impute)   (traditional)
 #
 # Usage:
-#   ./approach_c_intersect_first.sh \
-#       --inputs "platform1.bed,platform2.bed,platform3.bed" \
+#   ./approach_c_topmed.sh \
+#       --inputs "platform1.bed,platform2.bed" \
 #       --output /path/to/output \
 #       --topmed-token YOUR_TOKEN
 #
@@ -25,26 +28,21 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/common_functions.sh"
+
 # =============================================================================
 # Configuration
 # =============================================================================
 
-INPUT_BEDS=""  # Comma-separated list of PLINK prefixes
-OUTPUT_DIR="./results/approach_c_intersect"
+INPUT_BEDS=""
+OUTPUT_DIR="./results/approach_c_topmed"
 TOPMED_TOKEN=""
 TOPMED_PASSWORD=""
 THREADS=4
 
-# QC thresholds
-MAF_THRESHOLD=0.01
-HWE_PVALUE=1e-6
-GENO_THRESHOLD=0.02
-MIND_THRESHOLD=0.02
-HET_SD=3
-PIHAT_THRESHOLD=0.25
+# R² filter (traditional)
 R2_THRESHOLD=0.3
-
-TIMING_LOG=""
 
 # =============================================================================
 # Parse Arguments
@@ -54,72 +52,50 @@ print_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-APPROACH C: Intersect-first, then QC, then impute with TOPMed.
+APPROACH C: Thorough QC BEFORE Imputation → Merge AFTER Imputation + TOPMed
+
+KEY COMPARISON: Same as D but with thorough QC BEFORE imputation instead of after.
+Tests whether QC timing affects imputation quality.
+
+Workflow:
+  1. Thorough QC on each platform (95% call rate, het, relatedness)
+  2. Reference alignment (Rayner script) on each platform
+  3. Impute each platform SEPARATELY via TOPMed
+  4. MERGE across platforms AFTER imputation
+  5. R² > 0.3 filter (traditional)
+  6. Light post-imputation QC (call rate only)
 
 Required:
-  --inputs LIST              Comma-separated PLINK prefixes (e.g., "p1,p2,p3")
-  --topmed-token TOKEN       TOPMed API token
-  --topmed-password PASS     TOPMed password
+  --inputs LIST            Comma-separated PLINK prefixes
+  --topmed-token TOKEN     TOPMed API token
 
 Optional:
-  -o, --output DIR           Output directory (default: ./results/approach_c_intersect)
-  -t, --threads N            Threads (default: 4)
-  --maf FLOAT                MAF threshold (default: 0.01)
-  --r2 FLOAT                 Post-imputation R² threshold (default: 0.3)
-  -h, --help                 Show this help
+  -o, --output DIR         Output directory
+  --topmed-password PASS   Password for decryption
+  -t, --threads N          Threads (default: 4)
+  --r2 FLOAT               R² threshold (default: 0.3)
+  -h, --help               Show this help
 
-Key Difference from Approach A:
-  - Intersects variants BEFORE QC (loses platform-specific variants)
-  - Tests whether union vs intersect strategy matters
+C vs D comparison: Does QC before or after imputation matter?
 
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --inputs)
-            INPUT_BEDS="$2"
-            shift 2
-            ;;
-        -o|--output)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        --topmed-token)
-            TOPMED_TOKEN="$2"
-            shift 2
-            ;;
-        --topmed-password)
-            TOPMED_PASSWORD="$2"
-            shift 2
-            ;;
-        -t|--threads)
-            THREADS="$2"
-            shift 2
-            ;;
-        --maf)
-            MAF_THRESHOLD="$2"
-            shift 2
-            ;;
-        --r2)
-            R2_THRESHOLD="$2"
-            shift 2
-            ;;
-        -h|--help)
-            print_usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            print_usage
-            exit 1
-            ;;
+        --inputs) INPUT_BEDS="$2"; shift 2 ;;
+        -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
+        --topmed-token) TOPMED_TOKEN="$2"; shift 2 ;;
+        --topmed-password) TOPMED_PASSWORD="$2"; shift 2 ;;
+        -t|--threads) THREADS="$2"; shift 2 ;;
+        --r2) R2_THRESHOLD="$2"; shift 2 ;;
+        -h|--help) print_usage; exit 0 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [[ -z "$INPUT_BEDS" ]]; then
-    echo "ERROR: Input PLINK files required (--inputs)"
-    print_usage
+if [[ -z "$INPUT_BEDS" ]] || [[ -z "$TOPMED_TOKEN" ]]; then
+    echo "ERROR: --inputs and --topmed-token are required"
     exit 1
 fi
 
@@ -127,244 +103,252 @@ fi
 # Setup
 # =============================================================================
 
-mkdir -p "${OUTPUT_DIR}"/{logs,intersect,qc_before,liftover,imputation,qc_after,final}
-TIMING_LOG="${OUTPUT_DIR}/logs/timing.log"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${OUTPUT_DIR}/logs/pipeline.log"
-}
-
-time_start() {
-    echo "$1 START $(date +%s)" >> "${TIMING_LOG}"
-}
-
-time_end() {
-    echo "$1 END $(date +%s)" >> "${TIMING_LOG}"
-}
+mkdir -p "${OUTPUT_DIR}"/{logs,per_platform,imputation,merge,qc_after,final}
+setup_logging "${OUTPUT_DIR}"
 
 log "=============================================="
-log "APPROACH C: Intersect-First + QC + TOPMed"
+log "APPROACH C: Thorough QC BEFORE → Merge AFTER"
 log "=============================================="
+log "Server: TOPMed"
+log "KEY: Thorough QC before imputation (vs D which does QC after)"
 log "Inputs: ${INPUT_BEDS}"
 log "Output: ${OUTPUT_DIR}"
-log ""
+log "R² threshold: ${R2_THRESHOLD}"
 
 TOTAL_START=$(date +%s)
 
-# Parse input list
 IFS=',' read -ra PLATFORMS <<< "$INPUT_BEDS"
 N_PLATFORMS=${#PLATFORMS[@]}
-log "Number of platforms/batches: ${N_PLATFORMS}"
+log "Number of platforms: ${N_PLATFORMS}"
 
 # =============================================================================
-# STEP 1: INTERSECT VARIANTS ACROSS PLATFORMS
+# STEP 1: PER-PLATFORM THOROUGH QC + REFERENCE ALIGNMENT
 # =============================================================================
 
 log ""
-log "=== STEP 1: Intersect Variants Across Platforms ==="
-time_start "STEP1_INTERSECT"
+log "=== STEP 1: Per-Platform THOROUGH QC and Reference Alignment ==="
+log "  (KEY DIFFERENCE: Thorough QC BEFORE imputation)"
+time_start "STEP1_PER_PLATFORM_PREP"
 
-cd "${OUTPUT_DIR}/intersect"
-
-# Extract variant IDs from each platform
-log "  Extracting variant lists..."
 for i in "${!PLATFORMS[@]}"; do
-    plink="${PLATFORMS[$i]}"
-    awk '{print $2}' "${plink}.bim" > "variants_platform_${i}.txt"
-    n_vars=$(wc -l < "variants_platform_${i}.txt")
-    log "    Platform ${i}: ${n_vars} variants"
+    PLATFORM="${PLATFORMS[$i]}"
+    PLATFORM_DIR="${OUTPUT_DIR}/per_platform/platform_${i}"
+    mkdir -p "${PLATFORM_DIR}"
+
+    log "  Processing platform ${i}: $(basename ${PLATFORM})"
+
+    # THOROUGH QC (KEY DIFFERENCE from D)
+    log "    Running THOROUGH QC before imputation..."
+    run_thorough_qc "${PLATFORM}" "${PLATFORM_DIR}/thorough_qcd" ${THREADS}
+
+    log "    After thorough QC: $(count_variants_samples ${PLATFORM_DIR}/thorough_qcd)"
+
+    # Reference alignment (Rayner script)
+    log "    Running reference alignment..."
+    run_reference_alignment "${PLATFORM_DIR}/thorough_qcd" "${PLATFORM_DIR}/ref_aligned" ${THREADS}
+
+    log "    After ref alignment: $(count_variants_samples ${PLATFORM_DIR}/ref_aligned)"
 done
 
-# Find intersection
-log "  Computing intersection..."
-if [[ ${N_PLATFORMS} -eq 1 ]]; then
-    cp variants_platform_0.txt common_variants.txt
-else
-    # Start with first platform
-    cp variants_platform_0.txt common_variants_tmp.txt
+time_end "STEP1_PER_PLATFORM_PREP"
 
-    # Intersect with each subsequent platform
-    for i in $(seq 1 $((N_PLATFORMS - 1))); do
-        comm -12 <(sort common_variants_tmp.txt) <(sort "variants_platform_${i}.txt") > common_variants_tmp2.txt
-        mv common_variants_tmp2.txt common_variants_tmp.txt
+# =============================================================================
+# STEP 2: PER-PLATFORM IMPUTATION (SEPARATELY)
+# =============================================================================
+
+log ""
+log "=== STEP 2: Per-Platform Imputation via TOPMed (SEPARATE) ==="
+time_start "STEP2_IMPUTATION"
+
+for i in "${!PLATFORMS[@]}"; do
+    PLATFORM_DIR="${OUTPUT_DIR}/per_platform/platform_${i}"
+    IMPUTE_DIR="${OUTPUT_DIR}/imputation/platform_${i}"
+    mkdir -p "${IMPUTE_DIR}"
+
+    log "  Imputing platform ${i}..."
+
+    cd "${IMPUTE_DIR}"
+
+    # Convert to VCF and liftover to hg38
+    plink2 --bfile "${PLATFORM_DIR}/ref_aligned" \
+        --export vcf-4.2 bgz \
+        --out pre_liftover \
+        --threads ${THREADS}
+
+    bcftools index pre_liftover.vcf.gz
+    run_liftover_hg38 pre_liftover.vcf.gz lifted_hg38.vcf.gz
+
+    # Split by chromosome
+    mkdir -p vcfs_for_imputation
+    for chr in {1..22}; do
+        bcftools view -r chr${chr} lifted_hg38.vcf.gz \
+            -Oz -o vcfs_for_imputation/chr${chr}.vcf.gz
+        bcftools index vcfs_for_imputation/chr${chr}.vcf.gz
     done
 
-    mv common_variants_tmp.txt common_variants.txt
-fi
+    # Submit to TOPMed
+    submit_topmed vcfs_for_imputation topmed_results \
+        "${TOPMED_TOKEN}" "${TOPMED_PASSWORD}" || {
+        log "NOTE: Manual submission required for platform ${i}"
+    }
 
-N_COMMON=$(wc -l < common_variants.txt)
-log "  Common variants across all platforms: ${N_COMMON}"
-
-# Extract common variants from each platform
-log "  Extracting common variants from each platform..."
-for i in "${!PLATFORMS[@]}"; do
-    plink="${PLATFORMS[$i]}"
-    plink2 --bfile "${plink}" \
-        --extract common_variants.txt \
-        --make-bed \
-        --out "platform_${i}_intersected" \
-        --threads ${THREADS}
+    cd "${OUTPUT_DIR}"
 done
 
-# Merge all platforms
-log "  Merging platforms..."
-if [[ ${N_PLATFORMS} -eq 1 ]]; then
-    cp platform_0_intersected.* merged_intersected.
-else
-    # Create merge list
-    for i in $(seq 1 $((N_PLATFORMS - 1))); do
-        echo "platform_${i}_intersected"
-    done > merge_list.txt
+time_end "STEP2_IMPUTATION"
 
-    plink2 --bfile platform_0_intersected \
-        --pmerge-list merge_list.txt bfile \
-        --make-bed \
-        --out merged_intersected \
-        --threads ${THREADS}
+# =============================================================================
+# STEP 3: MERGE ACROSS PLATFORMS (AFTER IMPUTATION)
+# =============================================================================
+
+log ""
+log "=== STEP 3: Merge Across Platforms (AFTER imputation) ==="
+time_start "STEP3_MERGE"
+
+cd "${OUTPUT_DIR}/merge"
+
+# Check if imputation results exist
+IMPUTED_PLATFORMS=()
+for i in "${!PLATFORMS[@]}"; do
+    IMPUTE_DIR="${OUTPUT_DIR}/imputation/platform_${i}/topmed_results"
+    if [[ -d "${IMPUTE_DIR}" ]]; then
+        IMPUTED_PLATFORMS+=("${IMPUTE_DIR}")
+        log "  Found results for platform ${i}"
+    fi
+done
+
+if [[ ${#IMPUTED_PLATFORMS[@]} -gt 0 ]]; then
+    # Concat chromosomes for each platform first
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        IMPUTE_DIR="${IMPUTED_PLATFORMS[$i]}"
+        ls "${IMPUTE_DIR}"/*.vcf.gz 2>/dev/null | sort -V > "vcf_list_${i}.txt"
+
+        if [[ -s "vcf_list_${i}.txt" ]]; then
+            bcftools concat -f "vcf_list_${i}.txt" -Oz -o "platform_${i}_imputed.vcf.gz"
+            bcftools index "platform_${i}_imputed.vcf.gz"
+        fi
+    done
+
+    # Find common variants across imputed platforms
+    log "  Finding common variants..."
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        if [[ -f "platform_${i}_imputed.vcf.gz" ]]; then
+            bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\n' "platform_${i}_imputed.vcf.gz" > "variants_${i}.txt"
+        fi
+    done
+
+    # Intersect variants
+    if [[ ${#IMPUTED_PLATFORMS[@]} -eq 1 ]]; then
+        cp variants_0.txt common_variants.txt
+    else
+        cp variants_0.txt common_tmp.txt
+        for i in $(seq 1 $((${#IMPUTED_PLATFORMS[@]} - 1))); do
+            if [[ -f "variants_${i}.txt" ]]; then
+                comm -12 <(sort common_tmp.txt) <(sort "variants_${i}.txt") > common_tmp2.txt
+                mv common_tmp2.txt common_tmp.txt
+            fi
+        done
+        mv common_tmp.txt common_variants.txt
+    fi
+
+    N_COMMON=$(wc -l < common_variants.txt)
+    log "  Common variants after imputation: ${N_COMMON}"
+
+    # Create regions file for filtering
+    awk '{print $1":"$2"-"$2}' common_variants.txt > common_regions.txt
+
+    # Filter each platform to common variants and merge
+    for i in "${!IMPUTED_PLATFORMS[@]}"; do
+        if [[ -f "platform_${i}_imputed.vcf.gz" ]]; then
+            bcftools view -R common_regions.txt "platform_${i}_imputed.vcf.gz" \
+                -Oz -o "platform_${i}_common.vcf.gz"
+            bcftools index "platform_${i}_common.vcf.gz"
+        fi
+    done
+
+    # Merge samples from all platforms
+    ls platform_*_common.vcf.gz > merge_list.txt
+    bcftools merge -l merge_list.txt -Oz -o merged_imputed.vcf.gz
+    bcftools index merged_imputed.vcf.gz
+
+    log "  Merged: $(bcftools query -l merged_imputed.vcf.gz | wc -l) samples"
 fi
 
-N_MERGED_VARS=$(wc -l < merged_intersected.bim)
-N_MERGED_SAMP=$(wc -l < merged_intersected.fam)
-log "  After intersect-merge: ${N_MERGED_VARS} variants, ${N_MERGED_SAMP} samples"
-
 cd "${OUTPUT_DIR}"
-time_end "STEP1_INTERSECT"
+time_end "STEP3_MERGE"
 
 # =============================================================================
-# STEP 2: PRE-IMPUTATION QC (on intersected data)
+# STEP 4: R² FILTER (TRADITIONAL)
 # =============================================================================
 
 log ""
-log "=== STEP 2: Pre-Imputation QC ==="
-time_start "STEP2_QC"
+log "=== STEP 4: R² Filter (Traditional) ==="
+log "  Threshold: R² > ${R2_THRESHOLD}"
+time_start "STEP4_R2_FILTER"
 
-cd "${OUTPUT_DIR}/qc_before"
+cd "${OUTPUT_DIR}/qc_after"
 
-# Copy intersected data
-cp ../intersect/merged_intersected.* ./
+if [[ -f "../merge/merged_imputed.vcf.gz" ]]; then
+    # Apply R² filter (traditional)
+    filter_r2 "../merge/merged_imputed.vcf.gz" "imputed_r2filt.vcf.gz" ${R2_THRESHOLD}
 
-# Apply same QC as Approach A
-log "  2a. Variant call rate filter..."
-plink2 --bfile merged_intersected \
-    --geno ${GENO_THRESHOLD} \
-    --make-bed \
-    --out step2a_geno \
-    --threads ${THREADS}
+    # Convert to PLINK
+    plink2 --vcf imputed_r2filt.vcf.gz \
+        --make-bed \
+        --out imputed_r2filt \
+        --threads ${THREADS}
 
-log "  2b. Sample call rate filter..."
-plink2 --bfile step2a_geno \
-    --mind ${MIND_THRESHOLD} \
-    --make-bed \
-    --out step2b_mind \
-    --threads ${THREADS}
-
-log "  2c. MAF filter (${MAF_THRESHOLD})..."
-plink2 --bfile step2b_mind \
-    --maf ${MAF_THRESHOLD} \
-    --make-bed \
-    --out step2c_maf \
-    --threads ${THREADS}
-
-log "  2d. HWE filter..."
-plink2 --bfile step2c_maf \
-    --hwe ${HWE_PVALUE} midp \
-    --make-bed \
-    --out step2d_hwe \
-    --threads ${THREADS}
-
-log "  2e. Heterozygosity filter..."
-plink2 --bfile step2d_hwe \
-    --het \
-    --out step2e_het \
-    --threads ${THREADS}
-
-Rscript - << 'RSCRIPT'
-het <- read.table("step2e_het.het", header=TRUE)
-het$HET_RATE <- (het$OBS_CT - het$O.HOM.) / het$OBS_CT
-mean_het <- mean(het$HET_RATE, na.rm=TRUE)
-sd_het <- sd(het$HET_RATE, na.rm=TRUE)
-het$OUTLIER <- abs(het$HET_RATE - mean_het) > 3 * sd_het
-outliers <- het[het$OUTLIER, c("FID", "IID")]
-write.table(outliers, "het_outliers.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
-RSCRIPT
-
-plink2 --bfile step2d_hwe \
-    --remove het_outliers.txt \
-    --make-bed \
-    --out step2e_het_filtered \
-    --threads ${THREADS}
-
-log "  2f. Relatedness filter..."
-plink2 --bfile step2e_het_filtered \
-    --indep-pairwise 200 50 0.25 \
-    --out prune_list \
-    --threads ${THREADS}
-
-plink2 --bfile step2e_het_filtered \
-    --extract prune_list.prune.in \
-    --make-bed \
-    --out pruned_for_ibd \
-    --threads ${THREADS}
-
-plink2 --bfile pruned_for_ibd \
-    --make-king-table \
-    --out ibd_check \
-    --threads ${THREADS}
-
-Rscript - << 'RSCRIPT'
-king <- read.table("ibd_check.kin0", header=TRUE)
-related <- king[king$KINSHIP > 0.125, ]
-if (nrow(related) > 0) {
-    sample_counts <- table(c(related$ID1, related$ID2))
-    to_remove <- names(sort(sample_counts, decreasing=TRUE))
-    removed <- c()
-    for (s in to_remove) {
-        remaining <- related[!(related$ID1 %in% removed | related$ID2 %in% removed), ]
-        if (nrow(remaining) == 0) break
-        if (s %in% c(remaining$ID1, remaining$ID2)) removed <- c(removed, s)
-    }
-    write.table(data.frame(FID=removed, IID=removed), "related_to_remove.txt",
-                row.names=FALSE, col.names=FALSE, quote=FALSE)
-} else {
-    file.create("related_to_remove.txt")
-}
-RSCRIPT
-
-plink2 --bfile step2e_het_filtered \
-    --remove related_to_remove.txt \
-    --make-bed \
-    --out final_qcd \
-    --threads ${THREADS}
+    log "  After R² filter: $(count_variants_samples imputed_r2filt)"
+fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP2_QC"
-
-N_QCD_VARS=$(wc -l < qc_before/final_qcd.bim)
-N_QCD_SAMP=$(wc -l < qc_before/final_qcd.fam)
-log "  After QC: ${N_QCD_VARS} variants, ${N_QCD_SAMP} samples"
+time_end "STEP4_R2_FILTER"
 
 # =============================================================================
-# STEPS 3-5: IMPUTATION AND POST-QC (same as Approach A)
+# STEP 5: LIGHT POST-IMPUTATION QC (since thorough QC was done before)
 # =============================================================================
 
 log ""
-log "=== STEP 3: Liftover and Submit to TOPMed ==="
-time_start "STEP3_IMPUTATION"
+log "=== STEP 5: Light Post-Imputation QC ==="
+log "  (Thorough QC was already done BEFORE imputation)"
+time_start "STEP5_QC_LIGHT"
 
-cd "${OUTPUT_DIR}/liftover"
+cd "${OUTPUT_DIR}/final"
 
-plink2 --bfile ../qc_before/final_qcd \
-    --export vcf-4.2 bgz \
-    --out for_imputation \
-    --threads ${THREADS}
+if [[ -f "../qc_after/imputed_r2filt.bed" ]]; then
+    # Light QC only - call rate check (since thorough QC was done before imputation)
+    log "  Applying light QC (call rate only)..."
 
-bcftools index for_imputation.vcf.gz
+    plink2 --bfile "../qc_after/imputed_r2filt" \
+        --geno ${STANDARD_GENO:-0.05} \
+        --mind ${STANDARD_MIND:-0.05} \
+        --make-bed \
+        --out approach_c_topmed \
+        --threads ${THREADS}
 
-log "  NOTE: Manual submission to TOPMed required"
-log "  Upload: ${OUTPUT_DIR}/liftover/for_imputation.vcf.gz"
+    log "  Final: $(count_variants_samples approach_c_topmed)"
+
+    # Create GWAS and RVAS output tracks
+    log "  Creating output tracks..."
+
+    # GWAS track: MAF > 1%
+    plink2 --bfile approach_c_topmed \
+        --maf 0.01 \
+        --make-bed \
+        --out approach_c_topmed_gwas \
+        --threads ${THREADS}
+
+    log "    GWAS track (MAF>1%): $(count_variants_samples approach_c_topmed_gwas)"
+
+    # RVAS track: All variants (no MAF filter)
+    cp approach_c_topmed.bed approach_c_topmed_rvas.bed
+    cp approach_c_topmed.bim approach_c_topmed_rvas.bim
+    cp approach_c_topmed.fam approach_c_topmed_rvas.fam
+    log "    RVAS track (all variants): $(count_variants_samples approach_c_topmed_rvas)"
+fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP3_IMPUTATION"
+time_end "STEP5_QC_LIGHT"
 
 # =============================================================================
 # SUMMARY
@@ -375,21 +359,24 @@ TOTAL_TIME=$((TOTAL_END - TOTAL_START))
 
 log ""
 log "=============================================="
-log "APPROACH C (Intersect-First) Complete!"
+log "APPROACH C (TOPMed) Complete!"
 log "=============================================="
+log "Total time: $(seconds_to_human ${TOTAL_TIME})"
 log ""
-log "Total wall-clock time: ${TOTAL_TIME} seconds"
+log "KEY WORKFLOW: Thorough QC BEFORE imputation, Merge AFTER imputation"
 log ""
-log "Key characteristics:"
-log "  - Started with ${N_COMMON} variants common to all ${N_PLATFORMS} platforms"
-log "  - Lost platform-specific variants (e.g., rare variants on one array)"
-log "  - Ensures all samples have identical variant coverage"
+log "Steps performed:"
+log "  1. Per-platform THOROUGH QC (call rate, het, relatedness)"
+log "  2. Per-platform reference alignment (Rayner)"
+log "  3. Per-platform imputation via TOPMed (SEPARATELY)"
+log "  4. MERGE across platforms (AFTER imputation)"
+log "  5. R² > ${R2_THRESHOLD} filter (traditional)"
+log "  6. Light post-imputation QC (call rate only)"
 log ""
-log "Comparison to Our Pipeline:"
-log "  - Our pipeline uses UNION merge (keeps all variants)"
-log "  - Intersect loses rare/unique variants that may be informative"
-log "  - Expect lower total variant count but more consistent QC metrics"
+log "C vs D comparison: This does QC BEFORE imputation, D does QC AFTER"
+log "  → Same merge timing (after impute), different QC timing"
+log "  → Shows effect of QC timing on imputation quality"
 log ""
-log "Results in: ${OUTPUT_DIR}/"
-log "Timing log: ${TIMING_LOG}"
-log ""
+log "Output tracks:"
+log "  GWAS: ${OUTPUT_DIR}/final/approach_c_topmed_gwas"
+log "  RVAS: ${OUTPUT_DIR}/final/approach_c_topmed_rvas"
