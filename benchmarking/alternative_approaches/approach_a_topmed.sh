@@ -23,6 +23,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/common_functions.sh"
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -280,7 +283,9 @@ plink2 --bfile step1e_het_filtered \
     --threads ${THREADS}
 
 # Final QC'd dataset
-cp step1f_unrelated.* ../qc_before_final.
+for ext in bed bim fam; do
+    cp "step1f_unrelated.${ext}" "../qc_before_final.${ext}"
+done
 cd "${OUTPUT_DIR}"
 
 time_end "STEP1_QC_BEFORE"

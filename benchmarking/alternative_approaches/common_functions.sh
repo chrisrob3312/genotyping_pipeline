@@ -242,6 +242,24 @@ RSCRIPT
     log "  Thorough QC complete: $(count_variants_samples ${output_prefix}_qcd)"
 }
 
+# Post-imputation QC - Alias for run_thorough_qc (for approach B compatibility)
+# Used AFTER imputation for B approaches (Southam 2011 style)
+run_post_imputation_qc() {
+    local input_prefix="$1"
+    local output_prefix="$2"
+    local threads="${3:-4}"
+    local maf_threshold="${4:-$STANDARD_MAF}"
+    local hwe_pvalue="${5:-$HWE_PVALUE}"
+    # Additional params 6,7 are for custom call rate thresholds (ignored, use STANDARD)
+
+    log "Running post-imputation QC (thorough)..."
+    log "  MAF threshold: ${maf_threshold}"
+    log "  HWE p-value: ${hwe_pvalue} (skipped by default)"
+
+    # Use thorough QC with MAF applied
+    run_thorough_qc "${input_prefix}" "${output_prefix}" "${threads}" "true" "${SKIP_HWE:-true}"
+}
+
 # Minimal QC - Only call rate (for pre-imputation in B, D approaches)
 run_minimal_qc() {
     local input_prefix="$1"
