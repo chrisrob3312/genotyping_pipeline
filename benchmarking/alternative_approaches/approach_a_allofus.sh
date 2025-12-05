@@ -186,33 +186,48 @@ cd "${OUTPUT_DIR}"
 time_end "STEP4_R2_FILTER"
 
 # =============================================================================
-# STEP 5: BASIC POST-QC
+# STEP 5: THOROUGH POST-IMPUTATION QC (QC both before AND after - standard practice)
 # =============================================================================
 
 log ""
-log "=== STEP 5: Basic Post-Imputation QC ==="
-time_start "STEP5_QC_AFTER"
+log "=== STEP 5: Thorough Post-Imputation QC ==="
+log "  (Standard practice: thorough QC both BEFORE and AFTER imputation)"
+time_start "STEP5_QC_THOROUGH"
 
 cd "${OUTPUT_DIR}/final"
 
 if [[ -f "../qc_after/imputed_filtered.vcf.gz" ]]; then
     plink2 --vcf ../qc_after/imputed_filtered.vcf.gz \
         --make-bed \
-        --out approach_a_allofus_final \
+        --out approach_a_allofus_pre_qc \
         --threads ${THREADS}
 
-    plink2 --bfile approach_a_allofus_final \
-        --geno 0.05 \
-        --mind 0.05 \
+    # Thorough QC after imputation (standard practice even with pre-imputation QC)
+    run_thorough_qc "approach_a_allofus_pre_qc" "approach_a_allofus" ${THREADS}
+
+    log "  Final: $(count_variants_samples approach_a_allofus)"
+
+    # Create GWAS and RVAS output tracks
+    log "  Creating output tracks..."
+
+    # GWAS track: MAF > 1%
+    plink2 --bfile approach_a_allofus \
+        --maf 0.01 \
         --make-bed \
-        --out approach_a_allofus_qcd \
+        --out approach_a_allofus_gwas \
         --threads ${THREADS}
 
-    log "  Final: $(count_variants_samples approach_a_allofus_qcd)"
+    log "    GWAS track (MAF>1%): $(count_variants_samples approach_a_allofus_gwas)"
+
+    # RVAS track: All variants (no MAF filter)
+    cp approach_a_allofus.bed approach_a_allofus_rvas.bed
+    cp approach_a_allofus.bim approach_a_allofus_rvas.bim
+    cp approach_a_allofus.fam approach_a_allofus_rvas.fam
+    log "    RVAS track (all variants): $(count_variants_samples approach_a_allofus_rvas)"
 fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP5_QC_AFTER"
+time_end "STEP5_QC_THOROUGH"
 
 # =============================================================================
 # SUMMARY
@@ -226,4 +241,9 @@ log "=============================================="
 log "APPROACH A (All of Us) Complete!"
 log "=============================================="
 log "Total time: $(seconds_to_human ${TOTAL_TIME})"
-log "Results: ${OUTPUT_DIR}/final/"
+log ""
+log "KEY WORKFLOW: Thorough QC BEFORE AND AFTER imputation, Merge BEFORE imputation"
+log ""
+log "Output tracks:"
+log "  GWAS: ${OUTPUT_DIR}/final/approach_a_allofus_gwas"
+log "  RVAS: ${OUTPUT_DIR}/final/approach_a_allofus_rvas"

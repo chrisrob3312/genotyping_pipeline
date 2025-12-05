@@ -12,35 +12,35 @@
 
 | Approach | Merge Timing | QC Timing | Filter | Key Test |
 |----------|--------------|-----------|--------|----------|
-| **A** | BEFORE impute | BEFORE impute (thorough) | R² > 0.3 | Traditional baseline |
-| **B** | BEFORE impute | AFTER impute (thorough) | R² > 0.3 | Southam 2011 - QC timing |
-| **C** | **AFTER impute** | **BEFORE impute** (thorough) | R² > 0.3 | **QC before, merge after** |
-| **D** | AFTER impute | AFTER impute | R² > 0.3 | Same as ours but R² filter |
-| **E** | AFTER impute | AFTER impute | MagicalRsq-X | Our 1-step |
-| **F** | AFTER impute | AFTER impute | MagicalRsq-X ×2 | Our 2-step |
+| **A** | BEFORE impute | BEFORE + AFTER (thorough both) | R² > 0.3 | Traditional baseline |
+| **B** | BEFORE impute | AFTER impute only (thorough) | R² > 0.3 | Southam 2011 - minimal prep |
+| **C** | **AFTER impute** | BEFORE + AFTER (thorough both) | R² > 0.3 | QC both, merge after |
+| **D** | AFTER impute | AFTER impute only (thorough) | R² > 0.3 | Same as ours but R² filter |
+| **E** | AFTER impute | AFTER impute only | MagicalRsq-X | Our 1-step |
+| **F** | AFTER impute | AFTER impute only | MagicalRsq-X ×2 | Our 2-step |
 
 ---
 
-## APPROACH A: Traditional - Merge Before, QC Before
+## APPROACH A: Traditional - Merge Before, QC Before AND After
 
-**Philosophy**: QC each platform thoroughly, then merge, then impute.
-**This is the standard GWAS workflow.**
+**Philosophy**: QC each platform thoroughly BEFORE imputation, and again AFTER.
+**This is the standard GWAS workflow with thorough QC at both stages.**
 
 ```
 Platform 1 ──► Thorough QC ──┐
-Platform 2 ──► Thorough QC ──┼──► INTERSECT/MERGE ──► Ref Align ──► Impute ──► R² > 0.3 ──► Basic QC
+Platform 2 ──► Thorough QC ──┼──► INTERSECT/MERGE ──► Ref Align ──► Impute ──► R² > 0.3 ──► Thorough QC
 Platform 3 ──► Thorough QC ──┘
-              (per-platform)      (BEFORE impute)                    (traditional)
+              (per-platform)      (BEFORE impute)                    (traditional)   (AFTER impute)
 ```
 
 **Steps:**
-1. Per-platform thorough QC (95% call rate, MAF, het, relatedness)
+1. Per-platform thorough QC (95% call rate, het, relatedness)
 2. INTERSECT variants across platforms
 3. Merge samples
 4. Reference alignment (Rayner script)
 5. Liftover → Impute
 6. R² > 0.3 filter
-7. Basic post-imputation QC (call rate check)
+7. **Thorough** post-imputation QC (call rate, het, relatedness)
 
 ---
 
@@ -68,16 +68,16 @@ Platform 3 ──► Minimal QC ──┘
 
 ---
 
-## APPROACH C: Thorough QC Before → Merge After Imputation
+## APPROACH C: Thorough QC Before AND After → Merge After Imputation
 
-**Philosophy**: Apply thorough QC on each platform BEFORE imputation, impute separately, then merge.
-**KEY COMPARISON**: Same as D but with thorough QC BEFORE imputation instead of after.
+**Philosophy**: Apply thorough QC BOTH before AND after imputation. Impute separately, then merge.
+**KEY COMPARISON**: Same as D but adds thorough QC BEFORE imputation.
 
 ```
 Platform 1 ──► THOROUGH QC ──► Ref Align ──► Impute ──┐
-Platform 2 ──► THOROUGH QC ──► Ref Align ──► Impute ──┼──► INTERSECT/MERGE ──► R² > 0.3 ──► Light QC
+Platform 2 ──► THOROUGH QC ──► Ref Align ──► Impute ──┼──► INTERSECT/MERGE ──► R² > 0.3 ──► Thorough QC
 Platform 3 ──► THOROUGH QC ──► Ref Align ──► Impute ──┘
-              (before impute)              (separately)    (AFTER impute)    (traditional)   (call rate)
+              (before impute)              (separately)    (AFTER impute)    (traditional)   (after impute)
 ```
 
 **Steps:**
@@ -86,9 +86,9 @@ Platform 3 ──► THOROUGH QC ──► Ref Align ──► Impute ──┘
 3. Per-platform imputation (SEPARATELY)
 4. INTERSECT/MERGE across platforms (AFTER imputation)
 5. R² > 0.3 filter (traditional)
-6. Light post-imputation QC (call rate only - thorough was done before)
+6. **Thorough** post-imputation QC (call rate, het, relatedness)
 
-**C vs D comparison**: Does QC timing matter? (before vs after imputation, both merge after)
+**C vs D comparison**: Does pre-imputation QC improve results? (C has both, D only has after)
 
 ---
 

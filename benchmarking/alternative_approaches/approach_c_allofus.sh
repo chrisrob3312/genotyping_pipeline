@@ -297,26 +297,21 @@ cd "${OUTPUT_DIR}"
 time_end "STEP4_R2_FILTER"
 
 # =============================================================================
-# STEP 5: LIGHT POST-IMPUTATION QC (since thorough QC was done before)
+# STEP 5: THOROUGH POST-IMPUTATION QC (QC both before AND after - standard practice)
 # =============================================================================
 
 log ""
-log "=== STEP 5: Light Post-Imputation QC ==="
-log "  (Thorough QC was already done BEFORE imputation)"
-time_start "STEP5_QC_LIGHT"
+log "=== STEP 5: Thorough Post-Imputation QC ==="
+log "  (Standard practice: thorough QC both BEFORE and AFTER imputation)"
+time_start "STEP5_QC_THOROUGH"
 
 cd "${OUTPUT_DIR}/final"
 
 if [[ -f "../qc_after/imputed_r2filt.bed" ]]; then
-    # Light QC only - call rate check (since thorough QC was done before imputation)
-    log "  Applying light QC (call rate only)..."
+    # Thorough QC after imputation (standard practice even with pre-imputation QC)
+    log "  Applying thorough QC (call rate, het, relatedness)..."
 
-    plink2 --bfile "../qc_after/imputed_r2filt" \
-        --geno ${STANDARD_GENO:-0.05} \
-        --mind ${STANDARD_MIND:-0.05} \
-        --make-bed \
-        --out approach_c_allofus \
-        --threads ${THREADS}
+    run_thorough_qc "../qc_after/imputed_r2filt" "approach_c_allofus" ${THREADS}
 
     log "  Final: $(count_variants_samples approach_c_allofus)"
 
@@ -340,7 +335,7 @@ if [[ -f "../qc_after/imputed_r2filt.bed" ]]; then
 fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP5_QC_LIGHT"
+time_end "STEP5_QC_THOROUGH"
 
 # =============================================================================
 # SUMMARY
@@ -355,7 +350,7 @@ log "APPROACH C (All of Us) Complete!"
 log "=============================================="
 log "Total time: $(seconds_to_human ${TOTAL_TIME})"
 log ""
-log "KEY WORKFLOW: Thorough QC BEFORE imputation, Merge AFTER imputation"
+log "KEY WORKFLOW: Thorough QC BEFORE AND AFTER imputation, Merge AFTER imputation"
 log ""
 log "Steps performed:"
 log "  1. Per-platform THOROUGH QC (call rate, het, relatedness)"
@@ -363,11 +358,11 @@ log "  2. Per-platform reference alignment (Rayner)"
 log "  3. Per-platform imputation via All of Us (SEPARATELY)"
 log "  4. MERGE across platforms (AFTER imputation)"
 log "  5. R² > ${R2_THRESHOLD} filter (traditional)"
-log "  6. Light post-imputation QC (call rate only)"
+log "  6. THOROUGH post-imputation QC (call rate, het, relatedness)"
 log ""
-log "C vs D comparison: This does QC BEFORE imputation, D does QC AFTER"
-log "  → Same merge timing (after impute), different QC timing"
-log "  → Shows effect of QC timing on imputation quality"
+log "C vs D comparison: This does QC BEFORE AND AFTER, D does only AFTER"
+log "  → Same merge timing (after impute), C adds pre-imputation QC"
+log "  → Shows effect of pre-imputation QC on final quality"
 log ""
 log "Output tracks:"
 log "  GWAS: ${OUTPUT_DIR}/final/approach_c_allofus_gwas"

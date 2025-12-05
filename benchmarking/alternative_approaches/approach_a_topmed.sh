@@ -405,12 +405,13 @@ cd "${OUTPUT_DIR}"
 time_end "STEP4_R2_FILTER"
 
 # =============================================================================
-# STEP 5: BASIC POST-IMPUTATION QC
+# STEP 5: THOROUGH POST-IMPUTATION QC (QC both before AND after - standard practice)
 # =============================================================================
 
 log ""
-log "=== STEP 5: Basic Post-Imputation QC ==="
-time_start "STEP5_QC_AFTER"
+log "=== STEP 5: Thorough Post-Imputation QC ==="
+log "  (Standard practice: thorough QC both BEFORE and AFTER imputation)"
+time_start "STEP5_QC_THOROUGH"
 
 cd "${OUTPUT_DIR}/final"
 
@@ -418,24 +419,35 @@ if [[ -f "../qc_after/imputed_r2filtered.vcf.gz" ]]; then
     # Convert to PLINK
     plink2 --vcf ../qc_after/imputed_r2filtered.vcf.gz \
         --make-bed \
-        --out approach_a_topmed_final \
+        --out approach_a_topmed_pre_qc \
         --threads ${THREADS}
 
-    # Basic post-imputation filters (less stringent since R² already applied)
-    plink2 --bfile approach_a_topmed_final \
-        --geno 0.05 \
-        --mind 0.05 \
+    # Thorough QC after imputation (standard practice even with pre-imputation QC)
+    run_thorough_qc "approach_a_topmed_pre_qc" "approach_a_topmed" ${THREADS}
+
+    log "  Final: $(count_variants_samples approach_a_topmed)"
+
+    # Create GWAS and RVAS output tracks
+    log "  Creating output tracks..."
+
+    # GWAS track: MAF > 1%
+    plink2 --bfile approach_a_topmed \
+        --maf 0.01 \
         --make-bed \
-        --out approach_a_topmed_qcd \
+        --out approach_a_topmed_gwas \
         --threads ${THREADS}
 
-    N_FINAL_VARS=$(wc -l < approach_a_topmed_qcd.bim)
-    N_FINAL_SAMP=$(wc -l < approach_a_topmed_qcd.fam)
-    log "  Final dataset: ${N_FINAL_VARS} variants, ${N_FINAL_SAMP} samples"
+    log "    GWAS track (MAF>1%): $(count_variants_samples approach_a_topmed_gwas)"
+
+    # RVAS track: All variants (no MAF filter)
+    cp approach_a_topmed.bed approach_a_topmed_rvas.bed
+    cp approach_a_topmed.bim approach_a_topmed_rvas.bim
+    cp approach_a_topmed.fam approach_a_topmed_rvas.fam
+    log "    RVAS track (all variants): $(count_variants_samples approach_a_topmed_rvas)"
 fi
 
 cd "${OUTPUT_DIR}"
-time_end "STEP5_QC_AFTER"
+time_end "STEP5_QC_THOROUGH"
 
 # =============================================================================
 # SUMMARY
@@ -448,15 +460,18 @@ log ""
 log "=============================================="
 log "APPROACH A (TOPMed) Complete!"
 log "=============================================="
+log "Total time: $(seconds_to_human ${TOTAL_TIME})"
 log ""
-log "Total wall-clock time: ${TOTAL_TIME} seconds"
+log "KEY WORKFLOW: Thorough QC BEFORE AND AFTER imputation, Merge BEFORE imputation"
 log ""
-log "Key differences from our pipeline:"
-log "  - MAF filtering BEFORE imputation (loses rare variants)"
-log "  - HWE filtering BEFORE imputation (may remove valid admixed variants)"
-log "  - Traditional R² filter instead of MagicalRsq-X"
-log "  - Relatedness filter uses PLINK IBD (vs GENESIS PCRelate)"
+log "Steps performed:"
+log "  1. Per-platform THOROUGH QC (call rate, het, relatedness)"
+log "  2. MERGE/INTERSECT platforms (BEFORE imputation)"
+log "  3. Reference alignment (Rayner)"
+log "  4. Imputation via TOPMed"
+log "  5. R² > 0.3 filter (traditional)"
+log "  6. THOROUGH post-imputation QC (call rate, het, relatedness)"
 log ""
-log "Results in: ${OUTPUT_DIR}/final/"
-log "Timing log: ${TIMING_LOG}"
-log ""
+log "Output tracks:"
+log "  GWAS: ${OUTPUT_DIR}/final/approach_a_topmed_gwas"
+log "  RVAS: ${OUTPUT_DIR}/final/approach_a_topmed_rvas"
